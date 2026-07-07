@@ -40,7 +40,9 @@ function blockTextStyle(
   block: TextBlock,
   scale: number,
   targetLanguage?: string | null,
-  textOverride?: string,
+  options?: {
+    hideText?: boolean;
+  },
 ): React.CSSProperties {
   const isRtl =
     block.style?.direction === "rtl" ||
@@ -60,8 +62,10 @@ function blockTextStyle(
     textAlign: (block.style?.alignment as React.CSSProperties["textAlign"]) ??
       (isRtl ? "right" : "left"),
     direction: isRtl ? "rtl" : (block.style?.direction ?? "ltr"),
-    color: block.style?.color ?? "#0f1419",
-    backgroundColor: block.style?.background_color ?? undefined,
+    color: options?.hideText ? "transparent" : (block.style?.color ?? "#0f1419"),
+    backgroundColor: options?.hideText
+      ? undefined
+      : (block.style?.background_color ?? undefined),
     lineHeight: block.style?.line_height
       ? `${block.style.line_height * scale}px`
       : 1.2,
@@ -143,20 +147,28 @@ export function PageCanvas({
   const h = page.height * scale;
 
   const hasTranslatedRaster = Boolean(page.translated_raster_path);
-  const useLiveOverlay = liveTranslatedOverlay && mode === "translated";
-  const useBakedTranslated = mode === "translated" && hasTranslatedRaster && !useLiveOverlay;
+  const useBakedTranslated =
+    mode === "translated" && hasTranslatedRaster && !diffMode && !liveTranslatedOverlay;
+  const useStrippedBackground =
+    mode === "translated" &&
+    !useBakedTranslated &&
+    Boolean(documentId) &&
+    (diffMode || liveTranslatedOverlay || !hasTranslatedRaster);
   const awaitingTranslatedRebuild =
-    mode === "translated" && !hasTranslatedRaster && !useLiveOverlay && Boolean(documentId);
+    mode === "translated" &&
+    !hasTranslatedRaster &&
+    !useStrippedBackground &&
+    Boolean(documentId);
 
   const rasterUrl = documentId
     ? useBakedTranslated
       ? `${api.translatedRasterUrl(documentId, page.page_number)}&t=${cacheKey}`
-      : mode === "original" && page.raster_path
-        ? `${api.rasterUrl(documentId, page.page_number)}?t=${cacheKey}`
-        : mode === "original"
-          ? api.thumbnailUrl(documentId, page.page_number)
-          : useLiveOverlay && page.raster_path
-            ? `${api.rasterUrl(documentId, page.page_number)}?t=${cacheKey}`
+      : useStrippedBackground
+        ? `${api.strippedRasterUrl(documentId, page.page_number)}&t=${cacheKey}`
+        : mode === "original" && page.raster_path
+          ? `${api.rasterUrl(documentId, page.page_number)}?t=${cacheKey}`
+          : mode === "original"
+            ? api.thumbnailUrl(documentId, page.page_number)
             : null
     : null;
 
@@ -166,9 +178,11 @@ export function PageCanvas({
 
   const overlayEnabled =
     showTextOverlay &&
-    (mode === "original" || useLiveOverlay || diffMode);
+    (mode === "original" || diffMode || liveTranslatedOverlay || useBakedTranslated);
 
-  const showTranslatedText = mode === "translated" && (useLiveOverlay || diffMode);
+  const showTranslatedText =
+    mode === "translated" && (diffMode || liveTranslatedOverlay || useStrippedBackground);
+  const hideOverlayText = useBakedTranslated && !diffMode;
 
   return (
     <div className={cn("flex h-full min-w-0 flex-1 flex-col", className)}>
@@ -202,15 +216,12 @@ export function PageCanvas({
             <img
               src={rasterUrl}
               alt=""
-              className={cn(
-                "pointer-events-none absolute inset-0 h-full w-full object-fill",
-                useLiveOverlay && "opacity-30",
-              )}
+              className="pointer-events-none absolute inset-0 h-full w-full object-fill"
               draggable={false}
             />
           )}
 
-          {(mode === "original" || useLiveOverlay) &&
+          {mode === "original" &&
             imageBlocks.map((block) => {
               if (!block.asset_path || !documentId) return null;
               const assetName = block.asset_path.split("/").pop() ?? "";
@@ -234,9 +245,10 @@ export function PageCanvas({
           {overlayEnabled &&
             tableBlocks.map((block) => {
               const rows = showTranslatedText
-                ? block.translated_rows ?? block.rows
+                ? block.translated_rows ?? []
                 : block.rows;
               const cellText = rows?.flat().join(" · ") ?? "";
+              if (showTranslatedText && !cellText.trim()) return null;
               const isDiff =
                 diffMode &&
                 JSON.stringify(block.rows) !== JSON.stringify(block.translated_rows);
@@ -245,9 +257,11 @@ export function PageCanvas({
                   key={block.id}
                   className={cn(
                     "absolute overflow-hidden border p-1 text-left",
+                    hideOverlayText && "border-transparent bg-transparent p-0",
                     isDiff
                       ? "border-warning/60 bg-warning/10"
-                      : "border-border/60 bg-white/80 dark:bg-zinc-900/80",
+                      : !hideOverlayText &&
+                          "border-border/60 bg-white/80 dark:bg-zinc-900/80",
                   )}
                   style={{
                     left: block.bbox.x * scale,
@@ -255,9 +269,10 @@ export function PageCanvas({
                     width: block.bbox.width * scale,
                     minHeight: block.bbox.height * scale,
                     fontSize: Math.max(8, 10 * scale),
+                    color: hideOverlayText ? "transparent" : undefined,
                   }}
                 >
-                  {cellText.slice(0, 200)}
+                  {!hideOverlayText && cellText.slice(0, 200)}
                 </div>
               );
             })}
@@ -265,8 +280,9 @@ export function PageCanvas({
           {overlayEnabled &&
             textBlocks.map((block) => {
               const text = showTranslatedText
-                ? block.translated_text ?? block.original_text
+                ? block.translated_text ?? ""
                 : block.original_text;
+              if (showTranslatedText && !text.trim()) return null;
               const highlighted =
                 searchQuery && text.toLowerCase().includes(searchQuery.toLowerCase());
               const selected = block.id === selectedBlockId;
@@ -284,17 +300,22 @@ export function PageCanvas({
                   type="button"
                   className={cn(
                     "absolute cursor-pointer text-left transition-all duration-100 border",
+                    hideOverlayText && !selected && !hovered && "border-transparent",
                     selected
                       ? "border-accent bg-accent/10 ring-2 ring-accent/40 z-10"
                       : hovered
                         ? "border-accent/60 bg-accent/5 z-10"
-                        : "border-transparent hover:border-accent/30",
-                    highlighted && "bg-warning/15",
+                        : hideOverlayText
+                          ? "border-transparent hover:border-accent/30"
+                          : "border-transparent hover:border-accent/30",
+                    highlighted && !hideOverlayText && "bg-warning/15",
                     isDiff && "border-warning/50 bg-warning/10",
-                    needsReview && !isDiff && "border-orange-400/40 bg-orange-50/50",
-                    block.is_edited && "border-green-500/50 bg-green-50/30",
+                    needsReview && !isDiff && !hideOverlayText && "border-orange-400/40 bg-orange-50/50",
+                    block.is_edited && !hideOverlayText && "border-green-500/50 bg-green-50/30",
                   )}
-                  style={blockTextStyle(block, scale, targetLanguage, text)}
+                  style={blockTextStyle(block, scale, targetLanguage, {
+                    hideText: hideOverlayText,
+                  })}
                   onClick={() => {
                     selectBlock(block.id);
                     onBlockSelect?.();
@@ -303,7 +324,9 @@ export function PageCanvas({
                   onMouseLeave={() => hoverBlock(null)}
                   aria-label={`Text block: ${text.slice(0, 40)}`}
                 >
-                  <span className="block p-0.5">{text}</span>
+                  <span className={cn("block p-0.5", hideOverlayText && "text-transparent")}>
+                    {text}
+                  </span>
                 </button>
               );
             })}
@@ -317,7 +340,7 @@ export function PageCanvas({
             </div>
           )}
 
-          {mode === "translated" && !hasTranslatedRaster && !documentId && !useLiveOverlay && (
+          {mode === "translated" && !hasTranslatedRaster && !documentId && !useStrippedBackground && (
             <div className="absolute inset-0 flex items-end justify-center p-6">
               <p className="max-w-md rounded-lg border border-border bg-card/90 px-4 py-3 text-center text-xs text-muted-foreground shadow-sm backdrop-blur-sm">
                 Re-translate this document to render the translated page.

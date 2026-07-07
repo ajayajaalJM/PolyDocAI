@@ -17,9 +17,11 @@ from reportlab.platypus import Paragraph
 from app.models.document import Document, ImageBlock, TableBlock, TextBlock
 from app.modules.reconstruction.text_compositor import (
     compose_translated_page,
+    measure_strip_quality,
     pil_to_png_bytes,
     strip_text_from_page,
 )
+from app.modules.reconstruction.vector_pdf import VectorPDFRebuilder
 from app.providers.fonts.manager import FontManager
 
 logger = structlog.get_logger(__name__)
@@ -36,6 +38,56 @@ class ReconstructionEngine:
     def __init__(self, font_manager: FontManager | None = None) -> None:
         self._fonts = font_manager or FontManager()
 
+    def _font_dirs(self, document_id: str | None, storage_root: Path | None) -> tuple[str, ...]:
+        if not document_id or not storage_root:
+            return ()
+        fonts_dir = storage_root / "fonts" / document_id
+        if fonts_dir.is_dir():
+            return (str(fonts_dir),)
+        return ()
+
+    def _backgrounds_dir(self, document_id: str, storage_root: Path) -> Path:
+        return storage_root / "uploads" / document_id / "backgrounds"
+
+    def _text_free_background_path(
+        self,
+        document_id: str,
+        page_number: int,
+        storage_root: Path,
+    ) -> Path:
+        return self._backgrounds_dir(document_id, storage_root) / f"page_{page_number:04d}.png"
+
+    def _load_page_background(
+        self,
+        page,
+        *,
+        document_id: str | None,
+        storage_root: Path | None,
+        upload_path: Path | None = None,
+        dpi: int = 300,
+    ) -> Image.Image | None:
+        if document_id and storage_root:
+            bg_path = self._text_free_background_path(document_id, page.page_number, storage_root)
+            if bg_path.exists():
+                return Image.open(bg_path).convert("RGB")
+        if upload_path and upload_path.suffix.lower() == ".pdf":
+            if document_id and storage_root:
+                bg_path = self._text_free_background_path(document_id, page.page_number, storage_root)
+                if not bg_path.exists():
+                    from app.modules.preprocessing.pdf_processor import PDFProcessor
+
+                    try:
+                        PDFProcessor.rasterize_text_free_page(
+                            upload_path,
+                            page.page_number,
+                            bg_path,
+                            dpi=dpi,
+                        )
+                        return Image.open(bg_path).convert("RGB")
+                    except Exception as exc:
+                        logger.debug("text_free_background_failed", error=str(exc))
+        return None
+
     def _text_blocks(self, blocks: list) -> list[TextBlock]:
         return [b for b in blocks if isinstance(b, TextBlock)]
 
@@ -46,17 +98,108 @@ class ReconstructionEngine:
         self,
         page,
         storage_root: Path | None = None,
+        *,
+        document_id: str | None = None,
+        upload_path: Path | None = None,
+        dpi: int = 300,
     ) -> bytes:
         """Page raster with original text regions erased (graphics preserved)."""
         if not page.raster_path or not storage_root:
             raise ValueError("Page raster required for stripping")
         raster = storage_root / page.raster_path
+        text_blocks = self._text_blocks(page.blocks)
+        table_blocks = self._table_blocks(page.blocks)
+        background = self._load_page_background(
+            page,
+            document_id=document_id,
+            storage_root=storage_root,
+            upload_path=upload_path,
+            dpi=dpi,
+        )
         img = strip_text_from_page(
             raster,
-            self._text_blocks(page.blocks),
-            self._table_blocks(page.blocks),
+            text_blocks,
+            table_blocks,
+            background=background,
         )
+        residual = measure_strip_quality(img, text_blocks, table_blocks)
+        if residual > 0.12:
+            logger.info(
+                "strip_refine_pass",
+                page=page.page_number,
+                residual=round(residual, 3),
+            )
+            img = strip_text_from_page(
+                raster,
+                text_blocks,
+                table_blocks,
+                background=background,
+                refine_passes=4,
+                aggressive=True,
+            )
         return pil_to_png_bytes(img)
+
+    def _stripped_raster_path(
+        self,
+        document_id: str,
+        page_number: int,
+        storage_root: Path,
+    ) -> Path:
+        return (
+            storage_root
+            / "uploads"
+            / document_id
+            / "stripped"
+            / f"page_{page_number:04d}.png"
+        )
+
+    def _load_stripped_background(
+        self,
+        document_id: str,
+        page,
+        storage_root: Path,
+    ) -> Image.Image | None:
+        stripped_path = self._stripped_raster_path(document_id, page.page_number, storage_root)
+        if stripped_path.exists():
+            return Image.open(stripped_path).convert("RGB")
+        return None
+
+    def _build_compose_background(
+        self,
+        page,
+        raster: Path,
+        text_blocks: list[TextBlock],
+        table_blocks: list[TableBlock],
+        *,
+        document_id: str | None = None,
+        storage_root: Path | None = None,
+        upload_path: Path | None = None,
+        dpi: int = 300,
+    ) -> Image.Image:
+        """Build a fresh text-free background from the original page (no stale cache)."""
+        pdf_background = self._load_page_background(
+            page,
+            document_id=document_id,
+            storage_root=storage_root,
+            upload_path=upload_path,
+            dpi=dpi,
+        )
+        background = strip_text_from_page(
+            raster,
+            text_blocks,
+            table_blocks,
+            background=pdf_background,
+        )
+        if measure_strip_quality(background, text_blocks, table_blocks) > 0.12:
+            background = strip_text_from_page(
+                raster,
+                text_blocks,
+                table_blocks,
+                background=pdf_background,
+                refine_passes=4,
+                aggressive=True,
+            )
+        return background
 
     def render_page_png(
         self,
@@ -64,18 +207,69 @@ class ReconstructionEngine:
         *,
         use_translated: bool = True,
         storage_root: Path | None = None,
-        dpi: int = 200,
+        document_id: str | None = None,
+        upload_path: Path | None = None,
+        dpi: int = 300,
+        source_type: str | None = None,
+        target_language: str | None = None,
     ) -> bytes:
         if not page.raster_path or not storage_root:
             raise ValueError("Page raster required for reconstruction")
+
+        font_dirs = self._font_dirs(document_id, storage_root)
+
+        if (
+            source_type == "vector_pdf"
+            and upload_path
+            and upload_path.suffix.lower() == ".pdf"
+            and use_translated
+            and document_id
+        ):
+            rebuilder = VectorPDFRebuilder(
+                font_dirs=font_dirs,
+                shape_fn=self._fonts.shape_text,
+                target_language=target_language,
+            )
+            pdf_bytes = rebuilder.rebuild_document_pdf(
+                upload_path,
+                Document(
+                    id=document_id,
+                    name=upload_path.name,
+                    file_path="",
+                    pages=[page],
+                    target_language=target_language,
+                ),
+                use_translated=True,
+                dpi=dpi,
+            )
+            if pdf_bytes:
+                png = rebuilder.rasterize_page(pdf_bytes, page.page_number, dpi=dpi)
+                if png:
+                    return png
+
         raster = storage_root / page.raster_path
         text_blocks = self._text_blocks(page.blocks)
+        table_blocks = self._table_blocks(page.blocks)
+        background = self._build_compose_background(
+            page,
+            raster,
+            text_blocks,
+            table_blocks,
+            document_id=document_id,
+            storage_root=storage_root,
+            upload_path=upload_path,
+            dpi=dpi,
+        )
         img = compose_translated_page(
             raster,
             text_blocks,
             use_translated=use_translated,
             shape_fn=self._fonts.shape_text,
-            table_blocks=self._table_blocks(page.blocks),
+            table_blocks=table_blocks,
+            background=background,
+            font_dirs=font_dirs,
+            target_language=target_language,
+            original_raster=raster,
         )
         return pil_to_png_bytes(img)
 
@@ -157,6 +351,7 @@ class ReconstructionEngine:
                 use_translated=use_translated,
                 shape_fn=self._fonts.shape_text,
                 table_blocks=self._table_blocks(blocks),
+                original_raster=page_raster,
             )
             self.rebuild_page_pdf(
                 c,
@@ -184,11 +379,9 @@ class ReconstructionEngine:
             box_h = bbox.height
 
             if isinstance(block, TextBlock):
-                text = (
-                    block.translated_text
-                    if use_translated and block.translated_text
-                    else block.original_text
-                )
+                text = block.translated_text if use_translated else block.original_text
+                if use_translated and (not text or not str(text).strip()):
+                    continue
                 self._draw_text_in_bbox(c, block, text, x, y, box_w, box_h, page_height)
 
             elif isinstance(block, TableBlock):
@@ -214,7 +407,33 @@ class ReconstructionEngine:
         use_translated: bool = True,
         storage_root: Path | None = None,
     ) -> bytes:
-        use_vector = document.metadata.source_type == "vector_pdf"
+        upload_path = None
+        if storage_root and document.file_path:
+            candidate = storage_root / document.file_path
+            if candidate.exists():
+                upload_path = candidate
+
+        if (
+            use_translated
+            and document.metadata.source_type == "vector_pdf"
+            and upload_path
+            and upload_path.suffix.lower() == ".pdf"
+        ):
+            font_dirs = self._font_dirs(document.id, storage_root)
+            rebuilder = VectorPDFRebuilder(
+                font_dirs=font_dirs,
+                shape_fn=self._fonts.shape_text,
+                target_language=document.target_language,
+            )
+            vector_pdf = rebuilder.rebuild_document_pdf(
+                upload_path,
+                document,
+                use_translated=True,
+                dpi=300,
+            )
+            if vector_pdf:
+                return vector_pdf
+
         buf = BytesIO()
         if not document.pages:
             c = canvas.Canvas(buf, pagesize=letter)
@@ -226,7 +445,7 @@ class ReconstructionEngine:
         c = canvas.Canvas(buf, pagesize=(first.width, first.height))
 
         for page in document.pages:
-            if use_translated and page.translated_raster_path and storage_root and not use_vector:
+            if use_translated and page.translated_raster_path and storage_root:
                 translated_path = storage_root / page.translated_raster_path
                 if translated_path.exists():
                     c.setPageSize((page.width, page.height))
@@ -245,6 +464,47 @@ class ReconstructionEngine:
             raster = None
             if page.raster_path and storage_root:
                 raster = storage_root / page.raster_path
+            font_dirs = self._font_dirs(document.id, storage_root)
+            if use_translated and raster and raster.exists():
+                text_blocks = self._text_blocks(page.blocks)
+                upload_path = None
+                if storage_root:
+                    candidate = storage_root / document.file_path
+                    if candidate.exists():
+                        upload_path = candidate
+                background = self._build_compose_background(
+                    page,
+                    raster,
+                    text_blocks,
+                    table_blocks,
+                    document_id=document.id,
+                    storage_root=storage_root,
+                    upload_path=upload_path,
+                    dpi=300,
+                )
+                img = compose_translated_page(
+                    raster,
+                    text_blocks,
+                    use_translated=True,
+                    shape_fn=self._fonts.shape_text,
+                    table_blocks=self._table_blocks(page.blocks),
+                    background=background,
+                    font_dirs=font_dirs,
+                    target_language=document.target_language,
+                    original_raster=raster,
+                )
+                self.rebuild_page_pdf(
+                    c,
+                    page.width,
+                    page.height,
+                    page.blocks,
+                    use_translated=use_translated,
+                    storage_root=storage_root,
+                    composed_image=img,
+                )
+                c.showPage()
+                continue
+
             self.rebuild_page_pdf(
                 c,
                 page.width,
@@ -252,8 +512,7 @@ class ReconstructionEngine:
                 page.blocks,
                 use_translated=use_translated,
                 storage_root=storage_root,
-                page_raster=raster if not use_vector else None,
-                vector_mode=use_vector,
+                page_raster=raster,
             )
             c.showPage()
 

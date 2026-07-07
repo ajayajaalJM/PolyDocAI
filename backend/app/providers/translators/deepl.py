@@ -22,7 +22,7 @@ class DeepLTranslator:
 
     def __init__(self, api_key: str) -> None:
         self._api_key = api_key.strip()
-        self._base_url = DEEPL_PRO_URL if self._api_key.endswith(":fx") else DEEPL_FREE_URL
+        self._base_url = DEEPL_FREE_URL if self._api_key.endswith(":fx") else DEEPL_PRO_URL
 
     async def is_available(self) -> bool:
         return bool(self._api_key)

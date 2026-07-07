@@ -80,6 +80,14 @@ export function ReviewPanel() {
             <dd className="font-medium">{((scores.translation_qa ?? 0) * 100).toFixed(0)}%</dd>
           </div>
           <div>
+            <dt className="text-muted-foreground">Layout quality</dt>
+            <dd className="font-medium">{((scores.layout_quality ?? 0) * 100).toFixed(0)}%</dd>
+          </div>
+          <div>
+            <dt className="text-muted-foreground">Source text left</dt>
+            <dd className="font-medium">{((scores.source_text_residual ?? 0) * 100).toFixed(0)}%</dd>
+          </div>
+          <div>
             <dt className="text-muted-foreground">Overflow blocks</dt>
             <dd className="font-medium">{scores.overflow_count ?? 0}</dd>
           </div>

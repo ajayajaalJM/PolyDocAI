@@ -110,15 +110,10 @@ def infer_style_from_image(
 
 
 def apply_target_typography(block: TextBlock, target_lang: str) -> None:
-    """Adjust block typography for the translated script (RTL mirroring, etc.)."""
-    code = (target_lang or "").lower()[:2]
-    if code not in RTL_LANGUAGES:
-        return
-    block.style.direction = "rtl"
-    if block.style.alignment == "left":
-        block.style.alignment = "right"
-    elif block.style.alignment == "right":
-        block.style.alignment = "left"
+    """Adjust block typography for the translated script (RTL mirroring, script fonts)."""
+    from app.modules.reconstruction.script_fonts import apply_target_typography as _apply
+
+    _apply(block, target_lang)
 
 
 def estimate_max_chars(bbox: tuple[float, float, float, float], font_size: float) -> int:

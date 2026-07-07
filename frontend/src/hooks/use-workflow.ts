@@ -6,12 +6,15 @@ import { api } from "@/lib/api";
 import { useDocumentStore } from "@/stores/document-store";
 import { usePipelineStore } from "@/stores/pipeline-store";
 import { useSettingsStore } from "@/stores/settings-store";
+import { useViewerStore } from "@/stores/viewer-store";
 
 export function useWorkflow() {
   const upload = useDocumentStore((s) => s.upload);
   const setDocument = useDocumentStore((s) => s.setDocument);
   const translator = useSettingsStore((s) => s.translator);
   const setSidebarSection = useSettingsStore((s) => s.setSidebarSection);
+  const setSinglePane = useViewerStore((s) => s.setSinglePane);
+  const setMobilePane = useViewerStore((s) => s.setMobilePane);
   const { setProcessing, setProgress, setError, reset } = usePipelineStore();
   const cancelRef = useRef<(() => void) | null>(null);
 
@@ -44,6 +47,8 @@ export function useWorkflow() {
             cancelRef.current = null;
             if (completed.status === "translated" || completed.status === "reconstructed") {
               setSidebarSection("review");
+              setSinglePane("translated");
+              setMobilePane("translated");
             }
             if (completed.metadata?.warnings?.length) {
               toast.warning("Processing finished with warnings", {
@@ -74,7 +79,7 @@ export function useWorkflow() {
         );
       });
     },
-    [upload, setDocument, translator, setProcessing, setProgress, setError, reset, setSidebarSection],
+    [upload, setDocument, translator, setProcessing, setProgress, setError, reset, setSidebarSection, setSinglePane, setMobilePane],
   );
 
   const cancel = useCallback(() => {

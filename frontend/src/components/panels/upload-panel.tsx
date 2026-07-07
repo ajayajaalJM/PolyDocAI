@@ -30,7 +30,9 @@ export function UploadPanel() {
       try {
         await uploadAndProcess(file);
         setSidebarSection("pages");
-        toast.success("Document ready", { description: "Review the translated pages." });
+        toast.success("Translation complete", {
+          description: "Your translated document is ready to review and export.",
+        });
       } catch (err) {
         toast.error("Processing failed", {
           description: err instanceof Error ? err.message : "Unknown error",
@@ -70,16 +72,16 @@ export function UploadPanel() {
           <Upload className="h-5 w-5" />
         </div>
         <p className="text-sm font-medium">
-          {isUploading ? "Uploading & processing…" : "Drop your document here"}
+          {isUploading ? "Translating your document…" : "Drop a document to translate"}
         </p>
         <p className="mt-1 text-[11px] text-muted-foreground">
-          PDF · PNG · JPG · TIFF · up to {MAX_MB} MB
+          One-click OCR, translation, and layout rebuild · PDF · PNG · JPG · up to {MAX_MB} MB
         </p>
         <input ref={inputRef} type="file" accept={ACCEPT} className="hidden" onChange={(e) => handleFiles(e.target.files)} />
       </div>
 
       <Button className="w-full" disabled={isUploading} onClick={() => inputRef.current?.click()}>
-        {isUploading ? "Processing…" : "Browse files"}
+        {isUploading ? "Translating…" : "Translate document"}
       </Button>
 
       {recentDocuments.length > 0 && (

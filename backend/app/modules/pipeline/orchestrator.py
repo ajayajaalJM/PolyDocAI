@@ -126,7 +126,9 @@ class PipelineOrchestrator:
         else:
             document.status = DocumentStatus.TRANSLATED
 
-        document.metadata.quality_scores = compute_quality_scores(document)
+        document.metadata.quality_scores = compute_quality_scores(
+            document, storage_root=Path(self._storage.root)
+        )
         document.metadata.processing_timings["total_ms"] = (time.perf_counter() - start) * 1000
         await self._repository.save(document)
         emit("review", "Ready for review.", 0.95)
@@ -141,7 +143,9 @@ class PipelineOrchestrator:
         document = await self._repository.get_or_raise(document_id)
         await self._reconstruct_pages(document, page_numbers=page_numbers)
         document.status = DocumentStatus.RECONSTRUCTED
-        document.metadata.quality_scores = compute_quality_scores(document)
+        document.metadata.quality_scores = compute_quality_scores(
+            document, storage_root=Path(self._storage.root)
+        )
         document.touch()
         await self._repository.save(document)
         return document
@@ -183,7 +187,9 @@ class PipelineOrchestrator:
         if reconstruct:
             await self._reconstruct_pages(document, page_numbers=[target_page])
             document.status = DocumentStatus.RECONSTRUCTED
-            document.metadata.quality_scores = compute_quality_scores(document)
+            document.metadata.quality_scores = compute_quality_scores(
+            document, storage_root=Path(self._storage.root)
+        )
             await self._repository.save(document)
 
         return document
@@ -200,9 +206,11 @@ class PipelineOrchestrator:
             pages = [p for p in pages if p.page_number in page_numbers]
 
         for page in pages:
-            for sub in ("translated", "stripped"):
+            for sub in ("translated", "stripped", "backgrounds"):
                 path = doc_dir / sub / f"page_{page.page_number:04d}.png"
                 path.unlink(missing_ok=True)
+
+        upload_path = await self._storage.get_upload_path(document.id)
 
         for page in pages:
             page.translated_raster_path = None
@@ -210,6 +218,9 @@ class PipelineOrchestrator:
                 self._reconstruction.render_stripped_page_png,
                 page,
                 storage_root=storage_root,
+                document_id=document.id,
+                upload_path=upload_path,
+                dpi=self._ocr_dpi,
             )
             await self._storage.save_stripped_raster(
                 document.id, page.page_number, stripped_bytes
@@ -220,7 +231,11 @@ class PipelineOrchestrator:
                 page,
                 use_translated=True,
                 storage_root=storage_root,
+                document_id=document.id,
+                upload_path=upload_path,
                 dpi=self._ocr_dpi,
+                source_type=document.metadata.source_type,
+                target_language=document.target_language,
             )
             path = await self._storage.save_translated_raster(
                 document.id, page.page_number, png_bytes
@@ -332,7 +347,7 @@ class PipelineOrchestrator:
             pdf_spans = None
             if is_pdf:
                 pdf_spans = await asyncio.to_thread(
-                    PDFProcessor.extract_text_spans, upload_path, page_num
+                    PDFProcessor.extract_text_spans, upload_path, page_num, self._ocr_dpi
                 )
 
             emit(
@@ -399,7 +414,9 @@ class PipelineOrchestrator:
         elif not skip_translation:
             document.status = DocumentStatus.TRANSLATED
 
-        document.metadata.quality_scores = compute_quality_scores(document)
+        document.metadata.quality_scores = compute_quality_scores(
+            document, storage_root=Path(self._storage.root)
+        )
         document.metadata.processing_timings["total_ms"] = (time.perf_counter() - start) * 1000
         await self._repository.save(document)
 

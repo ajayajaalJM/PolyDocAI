@@ -342,25 +342,33 @@ class TranslationService:
                 )
             if flat:
                 await self._translate_block_batches(flat, translator, src, tgt, flat)
+                by_pos: dict[tuple[int, int], str | None] = {}
                 for cell, block in zip(
                     [c for c in table.cells if c.text.strip()],
                     flat,
                     strict=False,
                 ):
                     cell.translated_text = block.translated_text
+                    if cell.style is None:
+                        from app.models.document import TextStyle
+
+                        cell.style = TextStyle()
+                    style_block = TextBlock(
+                        page_number=table.page_number,
+                        bbox=cell.bbox,
+                        original_text=cell.text,
+                        style=cell.style.model_copy(deep=True),
+                    )
+                    apply_target_typography(style_block, tgt)
+                    cell.style = style_block.style
+                    by_pos[(cell.row, cell.col)] = block.translated_text
+
                 translated_rows: list[list[str]] = []
-                for row in table.rows:
+                for ri, row in enumerate(table.rows):
                     out_row: list[str] = []
-                    for cell_text in row:
-                        match = next(
-                            (
-                                c
-                                for c in table.cells
-                                if c.text == cell_text and c.translated_text
-                            ),
-                            None,
-                        )
-                        out_row.append(match.translated_text if match else cell_text)
+                    for ci, cell_text in enumerate(row):
+                        translated = by_pos.get((ri, ci))
+                        out_row.append(translated if translated else cell_text)
                     translated_rows.append(out_row)
                 table.translated_rows = translated_rows
             return

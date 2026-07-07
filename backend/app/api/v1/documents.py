@@ -293,11 +293,14 @@ async def get_page_raster(
                     detail="Page raster not ready — wait for OCR to finish",
                 )
             storage_root = Path(container.storage.root)
+            upload_path = await container.storage.get_upload_path(document_id)
             try:
                 png_bytes = await asyncio.to_thread(
                     container.reconstruction.render_stripped_page_png,
                     page,
                     storage_root=storage_root,
+                    document_id=document_id,
+                    upload_path=upload_path,
                 )
             except ValueError as exc:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc

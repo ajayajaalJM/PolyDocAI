@@ -82,6 +82,8 @@ class ExportService:
         return buf.getvalue()
 
     def _export_html(self, document: Document, use_translated: bool) -> str:
+        import base64
+
         parts = [
             "<!DOCTYPE html>",
             "<html lang='en'>",
@@ -90,7 +92,7 @@ class ExportService:
             f"<title>{html.escape(document.name)}</title>",
             "<style>",
             "body{font-family:system-ui,sans-serif;margin:2rem;background:#f5f5f5;color:#1a1a1a;}",
-            ".page{position:relative;background:#fff;border:1px solid #e5e5e5;margin:2rem auto;box-shadow:0 4px 24px rgba(0,0,0,.08);overflow:hidden;}",
+            ".page{background:#fff;border:1px solid #e5e5e5;margin:2rem auto;box-shadow:0 4px 24px rgba(0,0,0,.08);overflow:hidden;max-width:100%;}",
             ".page-img{display:block;width:100%;height:auto;}",
             "h1{font-size:1.5rem;margin-bottom:2rem;}",
             "</style>",
@@ -104,14 +106,20 @@ class ExportService:
                 if use_translated and page.translated_raster_path
                 else page.raster_path
             )
-            parts.append(
-                f"<section class='page' data-page='{page.page_number}'>"
-            )
+            parts.append(f"<section class='page' data-page='{page.page_number}'>")
             if raster_rel:
-                parts.append(
-                    f"<img class='page-img' src='{html.escape(raster_rel)}' "
-                    f"width='{page.width}' height='{page.height}' alt='Page {page.page_number}'/>"
-                )
+                raster_path = self._storage_root / raster_rel
+                if raster_path.exists():
+                    encoded = base64.b64encode(raster_path.read_bytes()).decode("ascii")
+                    parts.append(
+                        f"<img class='page-img' src='data:image/png;base64,{encoded}' "
+                        f"width='{page.width}' height='{page.height}' alt='Page {page.page_number}'/>"
+                    )
+                else:
+                    parts.append(
+                        f"<div style='width:{page.width}px;height:{page.height}px;padding:2rem'>"
+                        f"Page image missing</div>"
+                    )
             else:
                 parts.append(
                     f"<div style='width:{page.width}px;height:{page.height}px;padding:2rem'>"

@@ -79,7 +79,7 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
   rotation: 0,
   isFullscreen: false,
   searchQuery: "",
-  showLiveTranslatedOverlay: true,
+  showLiveTranslatedOverlay: false,
   containerSize: null,
 
   setZoom: (zoom, manual = true) =>

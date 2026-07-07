@@ -79,6 +79,70 @@ def _covered_by_spans(
     return any(_iou(bbox, _span_to_bbox(span)) >= threshold for span in spans)
 
 
+def _erase_boxes_from_paragraph(para) -> list[list[float]]:
+    """Collect line/word bounding boxes for precise text removal during reconstruction."""
+    boxes: list[list[float]] = []
+    for line in getattr(para, "lines", []) or []:
+        if line.bbox:
+            boxes.append([line.bbox[0], line.bbox[1], line.bbox[2], line.bbox[3]])
+        for word in getattr(line, "words", []) or []:
+            if word.bbox:
+                boxes.append([word.bbox[0], word.bbox[1], word.bbox[2], word.bbox[3]])
+    if not boxes and para.bbox:
+        boxes.append([para.bbox[0], para.bbox[1], para.bbox[2], para.bbox[3]])
+    return boxes
+
+
+def _erase_boxes_from_span(span: dict) -> list[list[float]]:
+    sb = span.get("bbox")
+    if not sb or len(sb) < 4:
+        return []
+    if len(sb) == 4 and float(sb[2]) > float(sb[0]):
+        return [[float(sb[0]), float(sb[1]), float(sb[2]) - float(sb[0]), float(sb[3]) - float(sb[1])]]
+    return [[float(sb[0]), float(sb[1]), float(sb[2]), float(sb[3])]]
+
+
+def _merge_vector_spans(spans: list[dict]) -> list[dict]:
+    """Merge adjacent line spans into paragraph blocks for better translation context."""
+    if not spans:
+        return []
+    ordered = sorted(spans, key=lambda s: (s["bbox"][1], s["bbox"][0]))
+    merged: list[dict] = []
+    current: dict | None = None
+
+    for span in ordered:
+        if current is None:
+            current = {**span, "text": str(span.get("text", "")).strip()}
+            current["_erase_boxes"] = _erase_boxes_from_span(span)
+            continue
+
+        cb = current["bbox"]
+        sb = span["bbox"]
+        fs = float(current.get("font_size") or 12)
+        same_line = abs(float(cb[1]) - float(sb[1])) <= fs * 0.55
+        gap = float(sb[0]) - float(cb[2])
+        close = gap <= fs * 1.8
+        if same_line and close:
+            current["text"] = f"{current['text']} {str(span.get('text', '')).strip()}".strip()
+            x1 = min(float(cb[0]), float(sb[0]))
+            y1 = min(float(cb[1]), float(sb[1]))
+            x2 = max(float(cb[2]), float(sb[2]))
+            y2 = max(float(cb[3]), float(sb[3]))
+            current["bbox"] = [x1, y1, x2, y2]
+            erase = list(current.get("_erase_boxes") or [])
+            erase.extend(_erase_boxes_from_span(span))
+            current["_erase_boxes"] = erase
+        else:
+            merged.append(current)
+            current = {**span, "text": str(span.get("text", "")).strip()}
+            if "_erase_boxes" not in current:
+                current["_erase_boxes"] = _erase_boxes_from_span(span)
+
+    if current:
+        merged.append(current)
+    return merged
+
+
 class DocumentModelBuilder:
     def merge_page(
         self,
@@ -104,7 +168,7 @@ class DocumentModelBuilder:
             and len(pdf_spans) >= MIN_VECTOR_SPANS
             and sum(len(s.get("text", "")) for s in pdf_spans) > 40
         )
-        vector_spans = pdf_spans or []
+        vector_spans = _merge_vector_spans(pdf_spans or [])
 
         if use_vector:
             for span in vector_spans:
@@ -126,7 +190,11 @@ class DocumentModelBuilder:
                         original_text=text,
                         style=style,
                         language=ocr.language,
-                        metadata={"max_chars": max_chars, "source": "pdf_vector"},
+                        metadata={
+                            "max_chars": max_chars,
+                            "source": "pdf_vector",
+                            "erase_boxes": span.get("_erase_boxes") or _erase_boxes_from_span(span),
+                        },
                     )
                 )
 
@@ -166,7 +234,11 @@ class DocumentModelBuilder:
                     original_text=para.text,
                     style=style,
                     language=ocr.language,
-                    metadata={"max_chars": max_chars, "source": "ocr"},
+                    metadata={
+                        "max_chars": max_chars,
+                        "source": "ocr",
+                        "erase_boxes": _erase_boxes_from_paragraph(para),
+                    },
                 )
             )
 

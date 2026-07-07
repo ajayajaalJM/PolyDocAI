@@ -1,0 +1,1 @@
+"""PolyDoc AI backend application."""

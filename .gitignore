@@ -1,0 +1,60 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Next.js
+frontend/.next/
+frontend/out/
+frontend/.turbo
+
+# Environment
+.env
+.env.local
+.env.*.local
+local.env
+
+# Storage (runtime data)
+storage/uploads/*
+storage/outputs/*
+storage/documents/*
+storage/models/*
+storage/settings.json
+storage/glossary.json
+!storage/uploads/.gitkeep
+!storage/outputs/.gitkeep
+!storage/documents/.gitkeep
+!storage/models/.gitkeep
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+frontend/coverage/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Generated
+frontend/src/types/api.d.ts

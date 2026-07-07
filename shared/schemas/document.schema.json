@@ -1,0 +1,219 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://polydoc.ai/schemas/document.schema.json",
+  "title": "PolyDoc Document Model",
+  "description": "Source of truth for the internal document representation.",
+  "type": "object",
+  "required": ["id", "name", "status", "pages", "metadata", "createdAt", "updatedAt"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "name": { "type": "string" },
+    "status": {
+      "type": "string",
+      "enum": ["uploaded", "processing", "ocr_complete", "layout_complete", "translated", "reconstructed", "exported", "error"]
+    },
+    "sourceLanguage": { "type": ["string", "null"] },
+    "targetLanguage": { "type": ["string", "null"] },
+    "pageCount": { "type": "integer", "minimum": 0 },
+    "filePath": { "type": "string" },
+    "mimeType": { "type": "string" },
+    "fileSize": { "type": "integer", "minimum": 0 },
+    "pages": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Page" }
+    },
+    "metadata": { "$ref": "#/$defs/DocumentMetadata" },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "BoundingBox": {
+      "type": "object",
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "width": { "type": "number" },
+        "height": { "type": "number" }
+      }
+    },
+    "TextStyle": {
+      "type": "object",
+      "properties": {
+        "fontFamily": { "type": ["string", "null"] },
+        "fontSize": { "type": ["number", "null"] },
+        "fontWeight": { "type": ["string", "null"] },
+        "fontStyle": { "type": ["string", "null"], "enum": ["normal", "italic", null] },
+        "color": { "type": ["string", "null"] },
+        "backgroundColor": { "type": ["string", "null"] },
+        "alignment": { "type": "string", "enum": ["left", "center", "right", "justify"] },
+        "direction": { "type": "string", "enum": ["ltr", "rtl"] },
+        "lineHeight": { "type": ["number", "null"] }
+      }
+    },
+    "BlockRelationship": {
+      "type": "object",
+      "required": ["targetId", "type"],
+      "properties": {
+        "targetId": { "type": "string" },
+        "type": { "type": "string", "enum": ["parent", "child", "sibling", "caption", "header", "footer"] }
+      }
+    },
+    "BlockBase": {
+      "type": "object",
+      "required": ["id", "type", "pageNumber", "bbox", "rotation", "layer", "zIndex", "readingOrder"],
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "type": "string" },
+        "pageNumber": { "type": "integer", "minimum": 1 },
+        "bbox": { "$ref": "#/$defs/BoundingBox" },
+        "rotation": { "type": "number", "default": 0 },
+        "layer": { "type": "string", "default": "content" },
+        "zIndex": { "type": "integer", "default": 0 },
+        "readingOrder": { "type": "integer", "minimum": 0 },
+        "relationships": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/BlockRelationship" },
+          "default": []
+        },
+        "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "metadata": { "type": "object", "additionalProperties": true, "default": {} }
+      }
+    },
+    "TextBlock": {
+      "allOf": [
+        { "$ref": "#/$defs/BlockBase" },
+        {
+          "type": "object",
+          "required": ["type", "originalText"],
+          "properties": {
+            "type": { "const": "text" },
+            "layoutType": {
+              "type": "string",
+              "enum": ["heading", "paragraph", "list", "caption", "quote", "header", "footer", "sidebar", "unknown"],
+              "default": "paragraph"
+            },
+            "originalText": { "type": "string" },
+            "translatedText": { "type": ["string", "null"] },
+            "isEdited": { "type": "boolean", "default": false },
+            "editedAt": { "type": ["string", "null"], "format": "date-time" },
+            "translationConfidence": { "type": ["number", "null"] },
+            "style": { "$ref": "#/$defs/TextStyle" },
+            "language": { "type": ["string", "null"] }
+          }
+        }
+      ]
+    },
+    "ImageBlock": {
+      "allOf": [
+        { "$ref": "#/$defs/BlockBase" },
+        {
+          "type": "object",
+          "required": ["type", "assetPath"],
+          "properties": {
+            "type": { "const": "image" },
+            "layoutType": {
+              "type": "string",
+              "enum": ["figure", "logo", "image", "unknown"],
+              "default": "image"
+            },
+            "assetPath": { "type": "string" },
+            "resolution": {
+              "type": "object",
+              "properties": {
+                "width": { "type": "integer" },
+                "height": { "type": "integer" },
+                "dpi": { "type": ["number", "null"] }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "TableBlock": {
+      "allOf": [
+        { "$ref": "#/$defs/BlockBase" },
+        {
+          "type": "object",
+          "required": ["type", "rows"],
+          "properties": {
+            "type": { "const": "table" },
+            "rows": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            },
+            "translatedRows": {
+              "type": ["array", "null"],
+              "items": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ShapeBlock": {
+      "allOf": [
+        { "$ref": "#/$defs/BlockBase" },
+        {
+          "type": "object",
+          "required": ["type", "shapeType"],
+          "properties": {
+            "type": { "const": "shape" },
+            "shapeType": { "type": "string", "enum": ["line", "rect", "border", "background"] },
+            "fillColor": { "type": ["string", "null"] },
+            "strokeColor": { "type": ["string", "null"] },
+            "strokeWidth": { "type": ["number", "null"] }
+          }
+        }
+      ]
+    },
+    "Block": {
+      "oneOf": [
+        { "$ref": "#/$defs/TextBlock" },
+        { "$ref": "#/$defs/ImageBlock" },
+        { "$ref": "#/$defs/TableBlock" },
+        { "$ref": "#/$defs/ShapeBlock" }
+      ]
+    },
+    "Page": {
+      "type": "object",
+      "required": ["pageNumber", "width", "height", "blocks"],
+      "properties": {
+        "pageNumber": { "type": "integer", "minimum": 1 },
+        "width": { "type": "number" },
+        "height": { "type": "number" },
+        "thumbnailPath": { "type": ["string", "null"] },
+        "rasterPath": { "type": ["string", "null"] },
+        "translatedRasterPath": { "type": ["string", "null"] },
+        "ocrStatus": { "type": "string", "enum": ["pending", "processing", "complete", "error"], "default": "pending" },
+        "translationStatus": { "type": "string", "enum": ["pending", "processing", "complete", "error"], "default": "pending" },
+        "exportStatus": { "type": "string", "enum": ["pending", "processing", "complete", "error"], "default": "pending" },
+        "blocks": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Block" }
+        }
+      }
+    },
+    "DocumentMetadata": {
+      "type": "object",
+      "properties": {
+        "author": { "type": ["string", "null"] },
+        "title": { "type": ["string", "null"] },
+        "subject": { "type": ["string", "null"] },
+        "keywords": { "type": "array", "items": { "type": "string" }, "default": [] },
+        "processingTimings": {
+          "type": "object",
+          "additionalProperties": { "type": "number" },
+          "default": {}
+        },
+        "warnings": { "type": "array", "items": { "type": "string" }, "default": [] }
+      },
+      "default": {}
+    }
+  }
+}

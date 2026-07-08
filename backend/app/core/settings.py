@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     layout_confidence: float = 0.2
     layout_imgsz: int = 1024
 
+    pipeline_max_concurrency: int = 2
+    pipeline_cache_enabled: bool = True
+    vision_provider: str = "heuristic"
+    ollama_vision_model: str = "llama3.2-vision"
+
     source_language: str = "en"
     target_language: str = "es"
 

@@ -11,6 +11,7 @@ import structlog
 from app.models.document import (
     Document,
     DocumentStatus,
+    Page,
     PageStatus,
     PipelineProgress,
     TableBlock,
@@ -27,6 +28,7 @@ from app.providers.repository import DocumentRepository
 from app.providers.storage.base import StorageProvider
 from app.providers.translators.errors import TranslationError
 from app.services.document_model.service import DocumentModelService
+from app.services.layout_solver.service import LayoutSolverService
 from app.services.verification.service import VerificationService
 
 logger = structlog.get_logger(__name__)
@@ -62,6 +64,7 @@ class PipelineOrchestrator:
         verification: VerificationService,
         model_builder: DocumentModelBuilder | None = None,
         ocr_dpi: int = 300,
+        max_concurrency: int = 2,
     ) -> None:
         self._storage = storage
         self._repository = repository
@@ -73,6 +76,7 @@ class PipelineOrchestrator:
         self._verification = verification
         self._model_builder = model_builder or DocumentModelBuilder()
         self._ocr_dpi = ocr_dpi
+        self._max_concurrency = max(1, max_concurrency)
         self._jobs: dict[str, asyncio.Task] = {}
 
     async def translate_only(
@@ -231,7 +235,7 @@ class PipelineOrchestrator:
 
         upload_path = await self._storage.get_upload_path(document.id)
 
-        for page in pages:
+        async def render_one(page) -> None:
             page.translated_raster_path = None
             stripped_bytes = await asyncio.to_thread(
                 self._reconstruction.render_stripped_page_png,
@@ -244,7 +248,6 @@ class PipelineOrchestrator:
             await self._storage.save_stripped_raster(
                 document.id, page.page_number, stripped_bytes
             )
-
             png_bytes = await asyncio.to_thread(
                 self._reconstruction.render_page_png,
                 page,
@@ -266,6 +269,8 @@ class PipelineOrchestrator:
                 page=page.page_number,
                 blocks=len(page.blocks),
             )
+
+        await asyncio.gather(*(render_one(page) for page in pages))
 
     async def _verify_pages(
         self,
@@ -345,80 +350,88 @@ class PipelineOrchestrator:
             document.metadata.source_type = "image"
 
         total = len(image_paths)
-        built_pages = []
+        storage_root = Path(self._storage.root)
+        semaphore = asyncio.Semaphore(self._max_concurrency)
+        completed = 0
 
         async def save_asset_cb(doc_id: str, name: str, content: bytes) -> str | None:
             path = await self._storage.save_asset(doc_id, name, content)
             return str(path.relative_to(self._storage.root))
 
-        for idx, image_path in enumerate(image_paths):
+        async def process_one_page(idx: int, image_path: Path) -> tuple[int, Page, list[str], dict, dict]:
+            nonlocal completed
             page_num = idx + 1
-            progress_base = 0.1 + (idx / total) * 0.5
 
-            emit("normalizing", f"Normalizing page {page_num}...", progress_base, page_num)
+            async with semaphore:
+                emit("normalizing", f"Processing page {page_num}...", 0.1 + (completed / total) * 0.5, page_num)
 
-            pdf_spans = None
-            if is_pdf:
-                pdf_spans = await asyncio.to_thread(
-                    PDFProcessor.extract_text_spans, upload_path, page_num, self._ocr_dpi
+                pdf_spans = None
+                if is_pdf:
+                    pdf_spans = await asyncio.to_thread(
+                        PDFProcessor.extract_text_spans, upload_path, page_num, self._ocr_dpi
+                    )
+
+                thumb_bytes = await asyncio.to_thread(
+                    PagePipeline.render_thumbnail, image_path
+                )
+                thumb_path = await self._storage.save_thumbnail(document_id, page_num, thumb_bytes)
+                rel_thumb = str(thumb_path.relative_to(storage_root))
+                rel_raster = str(image_path.relative_to(storage_root))
+
+                ctx = PageContext(
+                    document_id=document_id,
+                    page_number=page_num,
+                    source_path=image_path,
+                    upload_path=upload_path,
+                    is_pdf=is_pdf,
+                    dpi=self._ocr_dpi,
                 )
 
-            thumb_bytes = await asyncio.to_thread(
-                PagePipeline.render_thumbnail, image_path
-            )
-            thumb_path = await self._storage.save_thumbnail(document_id, page_num, thumb_bytes)
-            rel_thumb = str(thumb_path.relative_to(self._storage.root))
-            rel_raster = str(image_path.relative_to(self._storage.root))
+                page_result = await asyncio.to_thread(
+                    self._page_pipeline.process_page,
+                    ctx,
+                    thumbnail_path=rel_thumb,
+                    raster_path=rel_raster,
+                    pdf_spans=pdf_spans,
+                    storage_root=storage_root,
+                )
 
-            ctx = PageContext(
-                document_id=document_id,
-                page_number=page_num,
-                source_path=image_path,
-                upload_path=upload_path,
-                is_pdf=is_pdf,
-                dpi=self._ocr_dpi,
-            )
+                page = page_result.page
+                for block in page.blocks:
+                    if block.type == "image" and not block.asset_path:
+                        from app.modules.preprocessing.image_extractor import crop_region
+                        from uuid import uuid4
 
-            page_result = await asyncio.to_thread(
-                self._page_pipeline.process_page,
-                ctx,
-                thumbnail_path=rel_thumb,
-                raster_path=rel_raster,
-                pdf_spans=pdf_spans,
-            )
+                        work_path = ctx.normalized_path or image_path
+                        bbox = (block.bbox.x, block.bbox.y, block.bbox.width, block.bbox.height)
+                        cropped = crop_region(work_path, bbox)
+                        if cropped:
+                            asset_name = f"page{page_num}_fig_{uuid4().hex[:8]}.png"
+                            saved = await save_asset_cb(document_id, asset_name, cropped)
+                            if saved:
+                                block.asset_path = saved
 
-            page = page_result.page
-            if page_result.warnings:
-                document.metadata.warnings.extend(page_result.warnings)
+                completed += 1
+                return page_num, page, page_result.warnings, page_result.stage_timings, page_result.cache_hits
 
-            for block in page.blocks:
-                if block.type == "image" and not block.asset_path:
-                    from app.modules.preprocessing.image_extractor import crop_region
-                    from uuid import uuid4
+        results = await asyncio.gather(
+            *(process_one_page(idx, path) for idx, path in enumerate(image_paths))
+        )
+        results.sort(key=lambda r: r[0])
 
-                    work_path = ctx.normalized_path or image_path
-                    bbox = (block.bbox.x, block.bbox.y, block.bbox.width, block.bbox.height)
-                    cropped = crop_region(work_path, bbox)
-                    if cropped:
-                        asset_name = f"page{page_num}_fig_{uuid4().hex[:8]}.png"
-                        saved = await save_asset_cb(document_id, asset_name, cropped)
-                        if saved:
-                            block.asset_path = saved
-
-            if ctx.normalized_path:
-                try:
-                    page.normalized_raster_path = str(
-                        ctx.normalized_path.relative_to(Path(self._storage.root))
-                    )
-                except ValueError:
-                    pass
-
-            for stage, ms in page_result.stage_timings.items():
+        built_pages: list[Page] = []
+        cache_hit_total = 0
+        for page_num, page, page_warnings, stage_timings, cache_hits in results:
+            if page_warnings:
+                document.metadata.warnings.extend(page_warnings)
+            for stage, ms in stage_timings.items():
                 document.metadata.processing_timings[stage] = (
                     document.metadata.processing_timings.get(stage, 0.0) + ms
                 )
-
+            cache_hit_total += sum(1 for hit in cache_hits.values() if hit)
             built_pages.append(page)
+
+        document.metadata.processing_timings["cache_hits"] = float(cache_hit_total)
 
         emit("building_model", "Finalizing document model...", 0.65)
         model_result = self._document_model.apply_pages(document, built_pages)

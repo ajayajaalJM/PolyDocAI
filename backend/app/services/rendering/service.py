@@ -11,6 +11,8 @@ from app.modules.reconstruction.engine import ReconstructionEngine
 from app.pipeline.stage_runner import run_stage
 from app.pipeline.types import StageResult
 from app.providers.rendering.base import RenderOptions, RenderResult, RendererProvider
+from app.services.rendering.semantic_docx import SemanticDOCXRenderer
+from app.services.rendering.semantic_html import SemanticHTMLRenderer
 
 logger = structlog.get_logger(__name__)
 
@@ -68,11 +70,14 @@ class PDFRenderer:
 class RenderingService:
     """Registry of renderer plugins consuming the same DOM."""
 
-    def __init__(self, reconstruction: ReconstructionEngine) -> None:
+    def __init__(self, reconstruction: ReconstructionEngine, storage_root: Path) -> None:
         self._reconstruction = reconstruction
+        self._storage_root = storage_root
         self._raster = RasterRenderer(reconstruction)
         self._renderers: dict[str, RendererProvider] = {
             "pdf": PDFRenderer(reconstruction),
+            "docx": SemanticDOCXRenderer(storage_root),
+            "html": SemanticHTMLRenderer(storage_root),
         }
 
     def get_renderer(self, fmt: str) -> RendererProvider:
@@ -87,7 +92,7 @@ class RenderingService:
         fmt: str,
         options: RenderOptions | None = None,
     ) -> StageResult[RenderResult]:
-        opts = options or RenderOptions()
+        opts = options or RenderOptions(storage_root=self._storage_root)
         renderer = self.get_renderer(fmt)
         return run_stage(
             "rendering",

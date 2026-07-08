@@ -21,7 +21,7 @@ from app.modules.layout.doclayout_service import LayoutElementType, LayoutPageRe
 from app.modules.ocr.paddle_service import OCRPageResult
 from app.modules.preprocessing.style_analyzer import estimate_max_chars, infer_style, style_from_pdf_span
 from app.services.ocr.service import OCRService
-from app.services.vision.service import VisionPageResult
+from app.services.vision.types import VisionPageResult
 
 LAYOUT_TO_TEXT_TYPE: dict[LayoutElementType, str] = {
     LayoutElementType.HEADING: "heading",

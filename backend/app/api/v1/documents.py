@@ -216,7 +216,10 @@ async def export_document(
     try:
         document = await container.document_repository.get_or_raise(document_id)
         content, filename = await container.export.export(
-            document, body.format, use_translated=body.use_translated
+            document,
+            body.format,
+            use_translated=body.use_translated,
+            semantic=body.semantic,
         )
         path = await container.storage.save_output(document_id, filename, content)
         rel = str(path.relative_to(container.storage.root))

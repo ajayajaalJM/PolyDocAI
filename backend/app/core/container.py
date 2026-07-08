@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 
 from app.core.device import detect_device, paddle_device
 from app.core.settings import Settings
@@ -15,6 +16,7 @@ from app.modules.reconstruction.engine import ReconstructionEngine
 from app.modules.translation.service import TranslationService
 from app.modules.upload.service import UploadService
 from app.models.document import TranslatorSettings
+from app.pipeline.cache import PipelineCache
 from app.providers.fonts.manager import FontManager
 from app.providers.glossary_repository import GlossaryRepository
 from app.providers.repository import DocumentRepository, SettingsRepository
@@ -32,6 +34,7 @@ from app.services.vision.service import VisionService
 class Container:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        storage_root = Path(settings.storage_root)
         self.storage = LocalStorageProvider(settings.storage_root)
         self.document_repository = DocumentRepository(self.storage)
         self.settings_repository = SettingsRepository(self.storage)
@@ -46,6 +49,7 @@ class Container:
         )
         self.font_manager = FontManager()
         self.glossary_repository = GlossaryRepository(settings.storage_root)
+        self.pipeline_cache = PipelineCache(storage_root)
         self.ocr = PaddleOCRService(lang=settings.ocr_lang, use_gpu=paddle_device() == "gpu")
         self.structure = PPStructureService(lang=settings.ocr_lang, use_gpu=paddle_device() == "gpu")
         self.layout = DocLayoutService(
@@ -56,7 +60,11 @@ class Container:
         self.model_builder = DocumentModelBuilder()
         self.normalization = ImageNormalizationService()
         self.layout_service = LayoutService(self.layout, self.structure)
-        self.vision = VisionService()
+        self.vision = VisionService(
+            provider=settings.vision_provider,
+            ollama_base_url=settings.ollama_base_url,
+            ollama_vision_model=settings.ollama_vision_model,
+        )
         self.ocr_service = OCRService(self.ocr, self.structure)
         self.document_model = DocumentModelService()
         self.layout_solver = LayoutSolverService()
@@ -66,12 +74,14 @@ class Container:
             self.vision,
             self.ocr_service,
             self.model_builder,
+            cache=self.pipeline_cache,
+            enable_cache=settings.pipeline_cache_enabled,
         )
         self.translation = TranslationService(self.translator_settings)
         self.reconstruction = ReconstructionEngine(self.font_manager)
-        self.rendering = RenderingService(self.reconstruction)
+        self.rendering = RenderingService(self.reconstruction, storage_root)
         self.verification = VerificationService(self.layout_solver)
-        self.export = ExportService(self.reconstruction, self.storage.root)
+        self.export = ExportService(self.rendering, storage_root)
         self.upload = UploadService(
             self.storage,
             self.document_repository,
@@ -88,6 +98,7 @@ class Container:
             self.layout_solver,
             self.verification,
             ocr_dpi=settings.ocr_dpi,
+            max_concurrency=settings.pipeline_max_concurrency,
         )
 
     async def initialize(self) -> None:

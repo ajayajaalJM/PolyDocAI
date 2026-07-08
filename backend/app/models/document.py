@@ -278,6 +278,7 @@ class ReconstructRequest(BaseModel):
 class ExportRequest(BaseModel):
     format: Literal["pdf", "docx", "html"]
     use_translated: bool = True
+    semantic: bool = True
 
 
 class ExportResponse(BaseModel):

@@ -80,6 +80,29 @@ Nothing downstream operates on raw OCR output directly — all stages enrich the
 | Reconstruction | PIL compositor, ReportLab, PyMuPDF | Vector/raster rebuild from DOM |
 | Storage | Local filesystem | Uploads, models, outputs, JSON |
 
+## Performance
+
+- **Parallel page processing** — `PIPELINE_MAX_CONCURRENCY` (default 2) controls concurrent page analysis
+- **Pipeline cache** — normalization, layout, and OCR results cached by content hash (`PIPELINE_CACHE_ENABLED`)
+- **Parallel reconstruction** — translated page renders run concurrently
+
+## Vision providers
+
+| Provider | Setting | Description |
+|----------|---------|-------------|
+| `heuristic` | `VISION_PROVIDER=heuristic` | Default layout-based enrichment |
+| `ollama` | `VISION_PROVIDER=ollama` | Optional VLM via Ollama (`OLLAMA_VISION_MODEL`) |
+
+## Export renderers
+
+| Format | Renderer | Notes |
+|--------|----------|-------|
+| PDF | Vector/raster via reconstruction engine | Default |
+| DOCX | `SemanticDOCXRenderer` | Structured sections, tables, headings (`semantic=true`) |
+| HTML | `SemanticHTMLRenderer` | Positioned DOM blocks (`semantic=true`) |
+
+Set `semantic: false` on export API for legacy raster-embed output.
+
 ## Extension points
 
 - Add `RendererProvider` implementations for DOCX/HTML/SVG plugins

@@ -111,6 +111,7 @@ export interface Page {
 }
 
 export interface Document {
+  schema_version?: string;
   id: string;
   name: string;
   status: DocumentStatus;

@@ -5,31 +5,29 @@ import time
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import uuid4
 
 import structlog
 
 from app.models.document import (
     Document,
     DocumentStatus,
-    ImageBlock,
     PageStatus,
     PipelineProgress,
     TableBlock,
     TextBlock,
 )
-from app.modules.layout.doclayout_service import DocLayoutService
-from app.modules.ocr.paddle_service import PaddleOCRService
-from app.modules.ocr.structure_service import PPStructureService
 from app.modules.pipeline.model_builder import DocumentModelBuilder
+from app.modules.pipeline.page_pipeline import PagePipeline
 from app.modules.pipeline.quality import compute_quality_scores
-from app.modules.preprocessing.image_extractor import crop_region
 from app.modules.preprocessing.pdf_processor import ImageProcessor, PDFProcessor
 from app.modules.reconstruction.engine import ReconstructionEngine
 from app.modules.translation.service import TranslationService
+from app.pipeline.context import PageContext
 from app.providers.repository import DocumentRepository
 from app.providers.storage.base import StorageProvider
 from app.providers.translators.errors import TranslationError
+from app.services.document_model.service import DocumentModelService
+from app.services.verification.service import VerificationService
 
 logger = structlog.get_logger(__name__)
 
@@ -39,12 +37,16 @@ ProgressCallback = Callable[[PipelineProgress], None]
 class PipelineOrchestrator:
     STAGES = [
         ("preparing", "Preparing document..."),
-        ("analyzing_structure", "Analyzing document structure..."),
-        ("building_model", "Generating document model..."),
-        ("matching_fonts", "Analyzing typography..."),
+        ("normalizing", "Normalizing page images..."),
+        ("layout_detection", "Detecting layout regions..."),
+        ("vision_understanding", "Analyzing document semantics..."),
+        ("ocr", "Extracting text..."),
+        ("building_model", "Building document model..."),
         ("translating", "Translating..."),
+        ("layout_solver", "Solving layout..."),
         ("review", "Ready for review..."),
-        ("reconstructing", "Building translated pages..."),
+        ("reconstructing", "Rendering translated pages..."),
+        ("verification", "Verifying visual fidelity..."),
         ("complete", "Processing complete."),
     ]
 
@@ -52,21 +54,23 @@ class PipelineOrchestrator:
         self,
         storage: StorageProvider,
         repository: DocumentRepository,
-        ocr: PaddleOCRService,
-        layout: DocLayoutService,
-        structure: PPStructureService,
+        page_pipeline: PagePipeline,
         translation: TranslationService,
         reconstruction: ReconstructionEngine,
+        document_model: DocumentModelService,
+        layout_solver: LayoutSolverService,
+        verification: VerificationService,
         model_builder: DocumentModelBuilder | None = None,
         ocr_dpi: int = 300,
     ) -> None:
         self._storage = storage
         self._repository = repository
-        self._ocr = ocr
-        self._layout = layout
-        self._structure = structure
+        self._page_pipeline = page_pipeline
         self._translation = translation
         self._reconstruction = reconstruction
+        self._document_model = document_model
+        self._layout_solver = layout_solver
+        self._verification = verification
         self._model_builder = model_builder or DocumentModelBuilder()
         self._ocr_dpi = ocr_dpi
         self._jobs: dict[str, asyncio.Task] = {}
@@ -114,6 +118,11 @@ class PipelineOrchestrator:
             await self._repository.save(document)
             raise
 
+        emit("layout_solver", "Adjusting layout for translations...", 0.55)
+        solved = self._layout_solver.solve_document(document)
+        if solved.success and solved.data:
+            document = solved.data
+
         document.metadata.processing_timings["translation_ms"] = (
             time.perf_counter() - start
         ) * 1000
@@ -122,6 +131,8 @@ class PipelineOrchestrator:
             pages_to_rebuild = page_numbers
             emit("reconstructing", "Building translated page images...", 0.7)
             await self._reconstruct_pages(document, page_numbers=pages_to_rebuild)
+            emit("verification", "Checking visual fidelity...", 0.88)
+            await self._verify_pages(document, page_numbers=pages_to_rebuild)
             document.status = DocumentStatus.RECONSTRUCTED
         else:
             document.status = DocumentStatus.TRANSLATED
@@ -141,7 +152,11 @@ class PipelineOrchestrator:
         page_numbers: list[int] | None = None,
     ) -> Document:
         document = await self._repository.get_or_raise(document_id)
+        solved = self._layout_solver.solve_document(document)
+        if solved.success and solved.data:
+            document = solved.data
         await self._reconstruct_pages(document, page_numbers=page_numbers)
+        await self._verify_pages(document, page_numbers=page_numbers)
         document.status = DocumentStatus.RECONSTRUCTED
         document.metadata.quality_scores = compute_quality_scores(
             document, storage_root=Path(self._storage.root)
@@ -185,11 +200,15 @@ class PipelineOrchestrator:
         await self._repository.save(document)
 
         if reconstruct:
+            solved = self._layout_solver.solve_document(document)
+            if solved.success and solved.data:
+                document = solved.data
             await self._reconstruct_pages(document, page_numbers=[target_page])
+            await self._verify_pages(document, page_numbers=[target_page])
             document.status = DocumentStatus.RECONSTRUCTED
             document.metadata.quality_scores = compute_quality_scores(
-            document, storage_root=Path(self._storage.root)
-        )
+                document, storage_root=Path(self._storage.root)
+            )
             await self._repository.save(document)
 
         return document
@@ -248,6 +267,36 @@ class PipelineOrchestrator:
                 blocks=len(page.blocks),
             )
 
+    async def _verify_pages(
+        self,
+        document: Document,
+        page_numbers: list[int] | None = None,
+    ) -> None:
+        storage_root = Path(self._storage.root)
+        pages = document.pages
+        if page_numbers:
+            pages = [p for p in pages if p.page_number in page_numbers]
+
+        original_paths: dict[int, Path] = {}
+        rendered_paths: dict[int, Path] = {}
+        for page in pages:
+            if page.raster_path:
+                original_paths[page.page_number] = storage_root / page.raster_path
+            if page.translated_raster_path:
+                rendered_paths[page.page_number] = storage_root / page.translated_raster_path
+
+        if not original_paths or not rendered_paths:
+            return
+
+        result = await asyncio.to_thread(
+            self._verification._verify_document,
+            document,
+            original_paths,
+            rendered_paths,
+        )
+        if isinstance(result, Document):
+            document.pages = result.pages
+
     async def process(
         self,
         document_id: str,
@@ -297,7 +346,6 @@ class PipelineOrchestrator:
 
         total = len(image_paths)
         built_pages = []
-        use_structure = self._structure.is_available
 
         async def save_asset_cb(doc_id: str, name: str, content: bytes) -> str | None:
             path = await self._storage.save_asset(doc_id, name, content)
@@ -305,44 +353,9 @@ class PipelineOrchestrator:
 
         for idx, image_path in enumerate(image_paths):
             page_num = idx + 1
-            progress_base = 0.1 + (idx / total) * 0.55
+            progress_base = 0.1 + (idx / total) * 0.5
 
-            structure_result = None
-            ocr_result = None
-            layout_result = None
-
-            if use_structure:
-                emit(
-                    "analyzing_structure",
-                    f"Analyzing structure on page {page_num}...",
-                    progress_base,
-                    page_num,
-                )
-                structure_result = await asyncio.to_thread(
-                    self._structure.analyze_page, image_path, page_num
-                )
-                ocr_result = self._structure.to_ocr_result(structure_result)
-                layout_result = self._structure.to_layout_result(structure_result)
-            else:
-                emit(
-                    "analyzing_structure",
-                    f"Detecting text on page {page_num}...",
-                    progress_base,
-                    page_num,
-                )
-                ocr_result = await asyncio.to_thread(self._ocr.extract_page, image_path, page_num)
-                layout_result = await asyncio.to_thread(
-                    self._layout.detect_page,
-                    image_path,
-                    page_num,
-                    ocr_result.width,
-                    ocr_result.height,
-                )
-
-            thumb_bytes = await asyncio.to_thread(PaddleOCRService.render_thumbnail, image_path)
-            thumb_path = await self._storage.save_thumbnail(document_id, page_num, thumb_bytes)
-            rel_thumb = str(thumb_path.relative_to(self._storage.root))
-            rel_raster = str(image_path.relative_to(self._storage.root))
+            emit("normalizing", f"Normalizing page {page_num}...", progress_base, page_num)
 
             pdf_spans = None
             if is_pdf:
@@ -350,46 +363,76 @@ class PipelineOrchestrator:
                     PDFProcessor.extract_text_spans, upload_path, page_num, self._ocr_dpi
                 )
 
-            emit(
-                "matching_fonts",
-                f"Analyzing typography on page {page_num}...",
-                progress_base + 0.08,
-                page_num,
+            thumb_bytes = await asyncio.to_thread(
+                PagePipeline.render_thumbnail, image_path
+            )
+            thumb_path = await self._storage.save_thumbnail(document_id, page_num, thumb_bytes)
+            rel_thumb = str(thumb_path.relative_to(self._storage.root))
+            rel_raster = str(image_path.relative_to(self._storage.root))
+
+            ctx = PageContext(
+                document_id=document_id,
+                page_number=page_num,
+                source_path=image_path,
+                upload_path=upload_path,
+                is_pdf=is_pdf,
+                dpi=self._ocr_dpi,
             )
 
-            structure_tables = structure_result.tables if structure_result else None
-            page = self._model_builder.merge_page(
-                ocr_result,
-                layout_result,
+            page_result = await asyncio.to_thread(
+                self._page_pipeline.process_page,
+                ctx,
                 thumbnail_path=rel_thumb,
                 raster_path=rel_raster,
                 pdf_spans=pdf_spans,
-                structure_tables=structure_tables,
-                image_path=image_path,
             )
 
+            page = page_result.page
+            if page_result.warnings:
+                document.metadata.warnings.extend(page_result.warnings)
+
             for block in page.blocks:
-                if isinstance(block, ImageBlock) and not block.asset_path:
+                if block.type == "image" and not block.asset_path:
+                    from app.modules.preprocessing.image_extractor import crop_region
+                    from uuid import uuid4
+
+                    work_path = ctx.normalized_path or image_path
                     bbox = (block.bbox.x, block.bbox.y, block.bbox.width, block.bbox.height)
-                    cropped = crop_region(image_path, bbox)
+                    cropped = crop_region(work_path, bbox)
                     if cropped:
                         asset_name = f"page{page_num}_fig_{uuid4().hex[:8]}.png"
                         saved = await save_asset_cb(document_id, asset_name, cropped)
                         if saved:
                             block.asset_path = saved
 
+            if ctx.normalized_path:
+                try:
+                    page.normalized_raster_path = str(
+                        ctx.normalized_path.relative_to(Path(self._storage.root))
+                    )
+                except ValueError:
+                    pass
+
+            for stage, ms in page_result.stage_timings.items():
+                document.metadata.processing_timings[stage] = (
+                    document.metadata.processing_timings.get(stage, 0.0) + ms
+                )
+
             built_pages.append(page)
 
-        emit("building_model", "Generating document model...", 0.72)
-        document = self._model_builder.apply_to_document(document, built_pages)
+        emit("building_model", "Finalizing document model...", 0.65)
+        model_result = self._document_model.apply_pages(document, built_pages)
+        if model_result.success and model_result.data:
+            document = model_result.data
+
         for page in document.pages:
             page.ocr_status = PageStatus.COMPLETE
         document.status = DocumentStatus.LAYOUT_COMPLETE
-        document.metadata.processing_timings["ocr_layout_ms"] = (time.perf_counter() - start) * 1000
+        document.metadata.processing_timings["analysis_ms"] = (time.perf_counter() - start) * 1000
         await self._repository.save(document)
 
         if not skip_translation:
-            emit("translating", "Translating...", 0.82)
+            emit("translating", "Translating...", 0.75)
             t_start = time.perf_counter()
             try:
                 document = await self._translation.translate_document(
@@ -402,14 +445,22 @@ class PipelineOrchestrator:
             document.metadata.processing_timings["translation_ms"] = (
                 time.perf_counter() - t_start
             ) * 1000
+
+            emit("layout_solver", "Solving translated layout...", 0.82)
+            solved = self._layout_solver.solve_document(document)
+            if solved.success and solved.data:
+                document = solved.data
+
             await self._repository.save(document)
         else:
             for page in document.pages:
                 page.translation_status = PageStatus.COMPLETE
 
         if not skip_reconstruction and not skip_translation:
-            emit("reconstructing", "Building translated page images...", 0.92)
+            emit("reconstructing", "Building translated page images...", 0.88)
             await self._reconstruct_pages(document)
+            emit("verification", "Verifying visual fidelity...", 0.94)
+            await self._verify_pages(document)
             document.status = DocumentStatus.RECONSTRUCTED
         elif not skip_translation:
             document.status = DocumentStatus.TRANSLATED

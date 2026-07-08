@@ -7,6 +7,9 @@ import aiofiles
 
 from app.models.document import Document, TranslatorSettings
 from app.providers.storage.base import StorageProvider
+from app.services.document_model.service import DocumentModelService
+
+_document_model = DocumentModelService()
 
 
 class DocumentRepository:
@@ -19,7 +22,10 @@ class DocumentRepository:
         return document
 
     async def get(self, document_id: str) -> Document | None:
-        return await self._storage.load_document_model(document_id)
+        document = await self._storage.load_document_model(document_id)
+        if document:
+            return _document_model.migrate_if_needed(document)
+        return None
 
     async def get_or_raise(self, document_id: str) -> Document:
         document = await self.get(document_id)

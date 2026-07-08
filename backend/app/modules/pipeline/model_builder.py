@@ -3,20 +3,25 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import uuid4
 
+from app.core.geometry import iou
 from app.models.document import (
     BoundingBox,
     Document,
     ImageBlock,
     ImageResolution,
+    InlineRun,
     Page,
     PageStatus,
     TableBlock,
     TableCell,
     TextBlock,
+    VisionBlockData,
 )
 from app.modules.layout.doclayout_service import LayoutElementType, LayoutPageResult
 from app.modules.ocr.paddle_service import OCRPageResult
 from app.modules.preprocessing.style_analyzer import estimate_max_chars, infer_style, style_from_pdf_span
+from app.services.ocr.service import OCRService
+from app.services.vision.service import VisionPageResult
 
 LAYOUT_TO_TEXT_TYPE: dict[LayoutElementType, str] = {
     LayoutElementType.HEADING: "heading",
@@ -46,24 +51,12 @@ def _bbox_tuple_to_model(bbox: tuple[float, float, float, float]) -> BoundingBox
     return BoundingBox(x=bbox[0], y=bbox[1], width=bbox[2], height=bbox[3])
 
 
-def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
-    ax, ay, aw, ah = a
-    bx, by, bw, bh = b
-    x1 = max(ax, bx)
-    y1 = max(ay, by)
-    x2 = min(ax + aw, bx + bw)
-    y2 = min(ay + ah, by + bh)
-    inter = max(0, x2 - x1) * max(0, y2 - y1)
-    union = aw * ah + bw * bh - inter
-    return inter / union if union > 0 else 0.0
-
-
 def _is_inside_image_region(
     text_bbox: tuple[float, float, float, float],
     image_regions: list[tuple[float, float, float, float]],
 ) -> bool:
     for ib in image_regions:
-        if _iou(text_bbox, ib) >= IOU_IMAGE_FILTER:
+        if iou(text_bbox, ib) >= IOU_IMAGE_FILTER:
             return True
     return False
 
@@ -76,7 +69,7 @@ def _span_to_bbox(span: dict) -> tuple[float, float, float, float]:
 def _covered_by_spans(
     bbox: tuple[float, float, float, float], spans: list[dict], threshold: float = IOU_SPAN_COVER
 ) -> bool:
-    return any(_iou(bbox, _span_to_bbox(span)) >= threshold for span in spans)
+    return any(iou(bbox, _span_to_bbox(span)) >= threshold for span in spans)
 
 
 def _erase_boxes_from_paragraph(para) -> list[list[float]]:
@@ -153,6 +146,8 @@ class DocumentModelBuilder:
         pdf_spans: list[dict] | None = None,
         structure_tables: list | None = None,
         image_path: Path | None = None,
+        vision_result: VisionPageResult | None = None,
+        ocr_provider: str = "paddleocr",
     ) -> Page:
         blocks: list[TextBlock | ImageBlock | TableBlock] = []
 
@@ -170,6 +165,13 @@ class DocumentModelBuilder:
         )
         vector_spans = _merge_vector_spans(pdf_spans or [])
 
+        vision_by_bbox: dict[tuple[float, float, float, float], VisionBlockData] = {}
+        rel_by_bbox: dict[tuple[float, float, float, float], list] = {}
+        if vision_result:
+            for e in vision_result.enrichments:
+                vision_by_bbox[e.region.bbox] = e.vision
+                rel_by_bbox[e.region.bbox] = e.relationships
+
         if use_vector:
             for span in vector_spans:
                 text = str(span.get("text", "")).strip()
@@ -180,7 +182,15 @@ class DocumentModelBuilder:
                     continue
                 layout_type = self._match_layout_type(bbox, layout.regions)
                 style = style_from_pdf_span(span, layout_type, ocr.width)
+                vision = vision_by_bbox.get(self._nearest_region_bbox(bbox, layout.regions))
                 max_chars = estimate_max_chars(bbox, style.font_size or 12)
+                para_ocr = next(
+                    (p for p in ocr.paragraphs if iou(p.bbox, bbox) >= IOU_LAYOUT_MATCH),
+                    None,
+                )
+                ocr_block_data = (
+                    OCRService.paragraph_ocr_data(para_ocr, ocr_provider) if para_ocr else None
+                )
                 blocks.append(
                     TextBlock(
                         page_number=ocr.page_number,
@@ -190,6 +200,11 @@ class DocumentModelBuilder:
                         original_text=text,
                         style=style,
                         language=ocr.language,
+                        vision_data=vision,
+                        ocr_data=ocr_block_data,
+                        relationships=rel_by_bbox.get(
+                            self._nearest_region_bbox(bbox, layout.regions), []
+                        ),
                         metadata={
                             "max_chars": max_chars,
                             "source": "pdf_vector",
@@ -218,13 +233,20 @@ class DocumentModelBuilder:
             if pdf_spans and not use_vector:
                 for span in pdf_spans:
                     span_bbox = _span_to_bbox(span)
-                    if _iou(para.bbox, span_bbox) > 0.3:
+                    if iou(para.bbox, span_bbox) > 0.3:
                         style.font_size = span.get("font_size", style.font_size)
                         style.font_family = span.get("font_family", style.font_family)
                         style.color = span.get("color", style.color)
                         break
 
             max_chars = estimate_max_chars(para.bbox, style.font_size or 12)
+            region_bbox = self._nearest_region_bbox(para.bbox, layout.regions)
+            vision = vision_by_bbox.get(region_bbox)
+            if vision and vision.estimated_font_size and not pdf_spans:
+                style.font_size = vision.estimated_font_size
+            if vision and vision.alignment:
+                style.alignment = vision.alignment
+
             blocks.append(
                 TextBlock(
                     page_number=ocr.page_number,
@@ -234,6 +256,20 @@ class DocumentModelBuilder:
                     original_text=para.text,
                     style=style,
                     language=ocr.language,
+                    vision_data=vision,
+                    ocr_data=OCRService.paragraph_ocr_data(para, ocr_provider),
+                    relationships=rel_by_bbox.get(region_bbox, []),
+                    inline_runs=[
+                        InlineRun(
+                            text=line.text,
+                            style=style,
+                            bbox=_bbox_tuple_to_model(line.bbox),
+                            confidence=line.confidence,
+                        )
+                        for line in para.lines
+                    ]
+                    if para.lines
+                    else [InlineRun(text=para.text, style=style, bbox=_bbox_tuple_to_model(para.bbox))],
                     metadata={
                         "max_chars": max_chars,
                         "source": "ocr",
@@ -270,7 +306,7 @@ class DocumentModelBuilder:
                 table_texts = [
                     p.text
                     for p in ocr.paragraphs
-                    if _iou(p.bbox, region.bbox) >= IOU_LAYOUT_MATCH
+                    if iou(p.bbox, region.bbox) >= IOU_LAYOUT_MATCH
                 ]
                 if table_texts:
                     rows = [[t] for t in table_texts]
@@ -323,15 +359,28 @@ class DocumentModelBuilder:
         )
 
     @staticmethod
+    def _nearest_region_bbox(
+        bbox: tuple[float, float, float, float], regions: list
+    ) -> tuple[float, float, float, float] | None:
+        best: tuple[float, float, float, float] | None = None
+        best_iou = 0.0
+        for region in regions:
+            score = iou(bbox, region.bbox)
+            if score > best_iou:
+                best_iou = score
+                best = region.bbox
+        return best if best_iou >= IOU_LAYOUT_MATCH else None
+
+    @staticmethod
     def _match_layout_type(
         bbox: tuple[float, float, float, float], regions: list
     ) -> str:
         layout_type = "paragraph"
         best_iou = 0.0
         for region in regions:
-            iou = _iou(bbox, region.bbox)
-            if iou > best_iou and iou >= IOU_LAYOUT_MATCH:
-                best_iou = iou
+            score = iou(bbox, region.bbox)
+            if score > best_iou and score >= IOU_LAYOUT_MATCH:
+                best_iou = score
                 layout_type = LAYOUT_TO_TEXT_TYPE.get(region.element_type, "paragraph")
         return layout_type
 

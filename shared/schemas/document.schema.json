@@ -4,8 +4,9 @@
   "title": "PolyDoc Document Model",
   "description": "Source of truth for the internal document representation.",
   "type": "object",
-  "required": ["id", "name", "status", "pages", "metadata", "createdAt", "updatedAt"],
+  "required": ["id", "name", "status", "schemaVersion", "pages", "metadata", "createdAt", "updatedAt"],
   "properties": {
+    "schemaVersion": { "type": "string", "default": "2.0.0" },
     "id": { "type": "string", "format": "uuid" },
     "name": { "type": "string" },
     "status": {

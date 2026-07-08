@@ -2,37 +2,90 @@
 
 ## Overview
 
-PolyDoc AI converts scanned documents, PDFs, and images into a structured JSON document model, translates text via local LLMs, and reconstructs layout-preserving exports.
+PolyDoc AI is a modular AI Document Reconstruction Platform. It imports images and PDFs, builds a versioned **Document Object Model (DOM)**, translates content, solves layout constraints, renders with high visual fidelity, and exports to multiple formats.
 
-## Data flow
+## Pipeline
+
+Every page flows through independently testable stages:
 
 ```
-Upload → OCR (PaddleOCR) → Layout (DocLayout-YOLO) → Document Model
-  → Translation (Ollama / OpenAI-compatible) → Reconstruction → Export
+Input
+  → Image Normalization
+  → Layout Detection
+  → Vision Understanding
+  → OCR (region-scoped)
+  → Style Extraction
+  → Document Object Model
+  → Translation
+  → Layout Solver
+  → Rendering
+  → Visual Verification
+  → Export
 ```
 
-The JSON document model in `shared/schemas/document.schema.json` is the **single source of truth**. OCR and layout outputs are normalized into this model before translation, UI rendering, or export.
+Implementation entry points:
+
+| Stage | Module |
+|-------|--------|
+| Orchestration | `backend/app/modules/pipeline/orchestrator.py` |
+| Per-page pipeline | `backend/app/modules/pipeline/page_pipeline.py` |
+| Stage results | `backend/app/pipeline/types.py` |
+| Image normalization | `backend/app/services/image_normalization/` |
+| Layout | `backend/app/services/layout/` |
+| Vision | `backend/app/services/vision/` |
+| OCR | `backend/app/services/ocr/` |
+| Style | `backend/app/services/style/` |
+| DOM | `backend/app/services/document_model/` |
+| Translation | `backend/app/modules/translation/` |
+| Layout solver | `backend/app/services/layout_solver/` |
+| Rendering | `backend/app/services/rendering/` |
+| Verification | `backend/app/services/verification/` |
+| Export | `backend/app/modules/export/` |
+
+## Document Object Model
+
+The DOM (`backend/app/models/document.py`, schema `shared/schemas/document.schema.json`) is the **single source of truth**. Schema version: **2.0.0**.
+
+```
+Document
+  → Pages
+    → Sections
+    → Blocks (text | image | table | shape)
+      → Inline Runs
+      → OCR data (words, lines, paragraphs)
+      → Vision data (hierarchy, importance, alignment)
+```
+
+Nothing downstream operates on raw OCR output directly — all stages enrich the DOM.
+
+## Plugin architecture
+
+| Provider | Location | Implementations |
+|----------|----------|-----------------|
+| Translators | `providers/translators/` | Ollama, OpenAI-compatible, NMT, DeepL, NoOp |
+| Storage | `providers/storage/` | Local filesystem |
+| Rendering | `providers/rendering/` + `services/rendering/` | PDF (extensible) |
+| OCR | `services/ocr/` | PaddleOCR, PP-Structure |
+| Layout | `services/layout/` | DocLayout-YOLO, PP-Structure |
 
 ## Components
 
 | Layer | Technology | Responsibility |
 |-------|------------|----------------|
-| Frontend | Next.js, Zustand, shadcn-style UI | Upload, compare, inspect, export |
-| Backend | FastAPI, Pydantic | REST API, pipelines, storage |
-| OCR | PaddleOCR | Text, bboxes, confidence, reading order |
-| Layout | DocLayout-YOLO | Headings, tables, figures, regions |
-| Translation | Ollama, LM Studio | Block-level local LLM translation |
-| Reconstruction | ReportLab, python-docx | Vector rebuild from model |
+| Frontend | Next.js, Zustand | Upload, compare, inspect, export |
+| Backend | FastAPI, Pydantic | REST API, pipeline services |
+| OCR | PaddleOCR / PP-Structure | Region-scoped text + metadata |
+| Layout | DocLayout-YOLO | Region detection before OCR |
+| Translation | Ollama, LM Studio, NMT, DeepL | Block-level translation |
+| Reconstruction | PIL compositor, ReportLab, PyMuPDF | Vector/raster rebuild from DOM |
 | Storage | Local filesystem | Uploads, models, outputs, JSON |
 
-## Extension points (Phase 2)
+## Extension points
 
-- **Storage:** `StorageProvider` → R2 / S3 / GCS
-- **Database:** Document metadata → PostgreSQL + SQLAlchemy + Alembic
-- **Auth:** JWT, OAuth, API keys (interfaces stubbed)
-- **Queues:** Redis + Celery/RQ for async OCR/translation/export
-- **Deployment:** Vercel frontend, Railway/Fly backend, Docker prod compose
-- **Future:** Glossary, translation memory, visual diff engine, batch processing
+- Add `RendererProvider` implementations for DOCX/HTML/SVG plugins
+- Add `OCRProvider` / `LayoutProvider` / `VisionProvider` behind existing service facades
+- Enable `PipelineCache` (`backend/app/pipeline/cache.py`) for multi-page caching
+- Phase 2: PostgreSQL metadata, job queues, cloud storage
 
 ## License note
 

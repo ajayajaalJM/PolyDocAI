@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from app.modules.reconstruction.font_resolver import load_pil_font, resolve_font_path
 from app.modules.reconstruction.script_fonts import apply_target_typography, map_font_family_for_target
 from app.models.document import BoundingBox, TextBlock, TextStyle
@@ -17,9 +19,22 @@ def test_arabic_font_skips_embedded_latin():
     assert "Arial.ttf" not in path or "Unicode" in path or "Geeza" in path or "Naskh" in path
 
 
+def _sample_latin_font() -> bytes:
+    candidates = [
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    ]
+    for path in candidates:
+        p = Path(path)
+        if p.exists():
+            return p.read_bytes()
+    raise FileNotFoundError("No sample Latin font found for test")
+
+
 def test_arabic_renders_not_tofu(tmp_path):
     latin = tmp_path / "Arial.ttf"
-    latin.write_bytes(open("/System/Library/Fonts/Supplemental/Arial.ttf", "rb").read())
+    latin.write_bytes(_sample_latin_font())
 
     block = TextBlock(
         page_number=1,

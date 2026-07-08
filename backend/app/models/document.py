@@ -50,6 +50,63 @@ class BlockRelationship(BaseModel):
     type: Literal["parent", "child", "sibling", "caption", "header", "footer"]
 
 
+class OCRWordData(BaseModel):
+    text: str
+    confidence: float
+    bbox: BoundingBox
+
+
+class OCRLineData(BaseModel):
+    text: str
+    confidence: float
+    bbox: BoundingBox
+    words: list[OCRWordData] = Field(default_factory=list)
+
+
+class OCRParagraphData(BaseModel):
+    text: str
+    confidence: float
+    bbox: BoundingBox
+    lines: list[OCRLineData] = Field(default_factory=list)
+    reading_order: int = 0
+
+
+class OCRBlockData(BaseModel):
+    words: list[OCRWordData] = Field(default_factory=list)
+    lines: list[OCRLineData] = Field(default_factory=list)
+    paragraphs: list[OCRParagraphData] = Field(default_factory=list)
+    reading_order: int = 0
+    provider: str | None = None
+
+
+class VisionBlockData(BaseModel):
+    importance: float = 0.5
+    hierarchy_level: int = 0
+    alignment: Literal["left", "center", "right", "justify"] | None = None
+    section_id: str | None = None
+    column_index: int | None = None
+    estimated_font_size: float | None = None
+    is_decorative: bool = False
+
+
+class InlineRun(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    text: str
+    translated_text: str | None = None
+    style: TextStyle = Field(default_factory=TextStyle)
+    bbox: BoundingBox | None = None
+    confidence: float | None = None
+
+
+class Section(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    title: str | None = None
+    layout_type: Literal["heading", "paragraph", "list", "table", "figure", "unknown"] = "unknown"
+    block_ids: list[str] = Field(default_factory=list)
+    reading_order: int = 0
+    hierarchy_level: int = 0
+
+
 class BlockBase(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     page_number: int
@@ -75,6 +132,9 @@ class TextBlock(BlockBase):
     translation_confidence: float | None = None
     style: TextStyle = Field(default_factory=TextStyle)
     language: str | None = None
+    ocr_data: OCRBlockData | None = None
+    vision_data: VisionBlockData | None = None
+    inline_runs: list[InlineRun] = Field(default_factory=list)
 
 
 class ImageResolution(BaseModel):
@@ -134,7 +194,11 @@ class Page(BaseModel):
     ocr_status: PageStatus = PageStatus.PENDING
     translation_status: PageStatus = PageStatus.PENDING
     export_status: PageStatus = PageStatus.PENDING
+    normalized_raster_path: str | None = None
+    sections: list[Section] = Field(default_factory=list)
     blocks: list[Block] = Field(default_factory=list)
+    layout_solved: bool = False
+    verification_score: float | None = None
 
 
 class DocumentMetadata(BaseModel):
@@ -148,7 +212,11 @@ class DocumentMetadata(BaseModel):
     source_type: Literal["vector_pdf", "scanned", "image"] | None = None
 
 
+DOM_SCHEMA_VERSION = "2.0.0"
+
+
 class Document(BaseModel):
+    schema_version: str = DOM_SCHEMA_VERSION
     id: str = Field(default_factory=lambda: str(uuid4()))
     name: str
     status: DocumentStatus = DocumentStatus.UPLOADED

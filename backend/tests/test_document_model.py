@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 
 from app.models.document import (
     BoundingBox,
+    DOM_SCHEMA_VERSION,
     Document,
     DocumentStatus,
     Page,
@@ -42,6 +43,7 @@ def test_document_round_trip_json():
     restored = Document.model_validate_json(json_str)
     assert restored.id == doc.id
     assert restored.pages[0].blocks[0].original_text == "Hello world"
+    assert restored.schema_version == DOM_SCHEMA_VERSION
 
 
 def test_text_block_discriminator():

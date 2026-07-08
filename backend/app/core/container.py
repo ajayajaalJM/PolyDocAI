@@ -10,6 +10,7 @@ from app.modules.ocr.paddle_service import PaddleOCRService
 from app.modules.ocr.structure_service import PPStructureService
 from app.modules.pipeline.model_builder import DocumentModelBuilder
 from app.modules.pipeline.orchestrator import PipelineOrchestrator
+from app.modules.pipeline.page_pipeline import PagePipeline
 from app.modules.reconstruction.engine import ReconstructionEngine
 from app.modules.translation.service import TranslationService
 from app.modules.upload.service import UploadService
@@ -18,6 +19,14 @@ from app.providers.fonts.manager import FontManager
 from app.providers.glossary_repository import GlossaryRepository
 from app.providers.repository import DocumentRepository, SettingsRepository
 from app.providers.storage.local import LocalStorageProvider
+from app.services.document_model.service import DocumentModelService
+from app.services.image_normalization.service import ImageNormalizationService
+from app.services.layout.service import LayoutService
+from app.services.layout_solver.service import LayoutSolverService
+from app.services.ocr.service import OCRService
+from app.services.rendering.service import RenderingService
+from app.services.verification.service import VerificationService
+from app.services.vision.service import VisionService
 
 
 class Container:
@@ -45,8 +54,23 @@ class Container:
             imgsz=settings.layout_imgsz,
         )
         self.model_builder = DocumentModelBuilder()
+        self.normalization = ImageNormalizationService()
+        self.layout_service = LayoutService(self.layout, self.structure)
+        self.vision = VisionService()
+        self.ocr_service = OCRService(self.ocr, self.structure)
+        self.document_model = DocumentModelService()
+        self.layout_solver = LayoutSolverService()
+        self.page_pipeline = PagePipeline(
+            self.normalization,
+            self.layout_service,
+            self.vision,
+            self.ocr_service,
+            self.model_builder,
+        )
         self.translation = TranslationService(self.translator_settings)
         self.reconstruction = ReconstructionEngine(self.font_manager)
+        self.rendering = RenderingService(self.reconstruction)
+        self.verification = VerificationService(self.layout_solver)
         self.export = ExportService(self.reconstruction, self.storage.root)
         self.upload = UploadService(
             self.storage,
@@ -57,11 +81,12 @@ class Container:
         self.pipeline = PipelineOrchestrator(
             self.storage,
             self.document_repository,
-            self.ocr,
-            self.layout,
-            self.structure,
+            self.page_pipeline,
             self.translation,
             self.reconstruction,
+            self.document_model,
+            self.layout_solver,
+            self.verification,
             ocr_dpi=settings.ocr_dpi,
         )
 

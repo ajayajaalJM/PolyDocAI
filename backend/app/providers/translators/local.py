@@ -199,6 +199,7 @@ def _build_batch_system_prompt(
         "- Preserve numbers, dates, currency amounts, URLs, and email addresses.\n"
         "- Preserve bullet points (•) and line breaks.\n"
         "- Do not merge, skip, or add items.\n"
+        "- When max_chars is provided, output MUST fit within that limit — rephrase shorter, never truncate mid-word.\n"
         "- Do not add notes or explanations.\n"
         '- Return ONLY JSON: {"translations": [{"id": 0, "text": "..."}, ...]}\n'
     )
@@ -248,6 +249,7 @@ def _build_single_system_prompt(
         "- Preserve __KEEP_N__ placeholders exactly as-is.\n"
         "- Preserve numbers, dates, currency amounts, URLs, and email addresses.\n"
         "- Preserve bullet points (•) and line breaks.\n"
+        "- When the text must fit a layout box, keep it concise — rephrase shorter rather than truncating.\n"
         "- Do not add notes or explanations.\n"
         '- Return ONLY JSON: {"translation": "..."}\n'
     )

@@ -102,21 +102,24 @@ class OCRService:
             return self._paddle.extract_page(image_path, page_number)
 
         full_page = self._paddle.extract_page(image_path, page_number)
-        paragraphs: list[OCRParagraph] = []
+        assigned: dict[int, tuple[OCRParagraph, float]] = {}
         order = 0
 
         for region in sorted(regions, key=lambda r: (r.bbox[1], r.bbox[0])):
-            matched = [
-                p
-                for p in full_page.paragraphs
-                if iou(p.bbox, region.bbox) >= 0.15
-                or self._center_inside(p.bbox, region.bbox)
-            ]
-            if matched:
-                for para in matched:
-                    para.reading_order = order
-                    paragraphs.append(para)
-                    order += 1
+            best_para: OCRParagraph | None = None
+            best_score = 0.0
+            for para in full_page.paragraphs:
+                score = iou(para.bbox, region.bbox)
+                if self._center_inside(para.bbox, region.bbox):
+                    score = max(score, 0.35)
+                if score >= 0.35 and score > best_score:
+                    best_para = para
+                    best_score = score
+
+            if best_para is not None:
+                pid = id(best_para)
+                if pid not in assigned or best_score > assigned[pid][1]:
+                    assigned[pid] = (best_para, best_score)
                 continue
 
             expanded = expand_bbox(region.bbox, padding=4.0, page_width=width, page_height=height)
@@ -138,8 +141,28 @@ class OCRService:
                 adj_bbox = (para.bbox[0] + ox, para.bbox[1] + oy, para.bbox[2], para.bbox[3])
                 para.bbox = adj_bbox
                 para.reading_order = order
-                paragraphs.append(para)
+                assigned[id(para)] = (para, 1.0)
                 order += 1
+
+        paragraphs: list[OCRParagraph] = []
+        seen_ids: set[int] = set()
+        for para in sorted(assigned.values(), key=lambda item: (item[0].bbox[1], item[0].bbox[0])):
+            p = para[0]
+            if id(p) in seen_ids:
+                continue
+            seen_ids.add(id(p))
+            p.reading_order = len(paragraphs)
+            paragraphs.append(p)
+
+        unmatched = [
+            p
+            for p in full_page.paragraphs
+            if id(p) not in seen_ids
+            and not any(iou(p.bbox, r.bbox) >= 0.35 for r in regions)
+        ]
+        for para in unmatched:
+            para.reading_order = len(paragraphs)
+            paragraphs.append(para)
 
         if not paragraphs:
             return full_page

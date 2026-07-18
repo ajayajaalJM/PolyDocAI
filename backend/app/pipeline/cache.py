@@ -11,6 +11,8 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
+CACHE_VERSION = "v2"
+
 
 class PipelineCache:
     def __init__(self, root: Path) -> None:
@@ -21,12 +23,29 @@ class PipelineCache:
         return self._root / document_id / f"page_{page_number:04d}" / stage / f"{content_hash}.json"
 
     @staticmethod
+    def hash_regions(regions: list) -> str:
+        payload = [
+            {
+                "type": getattr(r.element_type, "value", str(r.element_type)),
+                "bbox": list(r.bbox),
+            }
+            for r in regions
+        ]
+        raw = json.dumps(payload, sort_keys=True)
+        return hashlib.sha256(f"{CACHE_VERSION}:{raw}".encode()).hexdigest()[:16]
+
+    @staticmethod
     def hash_file(path: Path) -> str:
         h = hashlib.sha256()
         with path.open("rb") as f:
             for chunk in iter(lambda: f.read(65536), b""):
                 h.update(chunk)
         return h.hexdigest()[:16]
+
+    @staticmethod
+    def versioned_hash(*parts: str) -> str:
+        raw = f"{CACHE_VERSION}:" + ":".join(parts)
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
     def get(self, document_id: str, page_number: int, stage: str, content_hash: str) -> dict[str, Any] | None:
         path = self._key_path(document_id, page_number, stage, content_hash)

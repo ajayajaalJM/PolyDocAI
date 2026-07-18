@@ -136,7 +136,7 @@ class PPStructureService:
                 if bbox is None:
                     continue
 
-                element_type = LAYOUT_TYPE_MAP.get(label, LayoutElementType.PARAGRAPH)
+                element_type = LAYOUT_TYPE_MAP.get(label, LayoutElementType.UNKNOWN)
                 layout_regions.append(
                     LayoutRegion(
                         element_type=element_type,
@@ -151,21 +151,37 @@ class PPStructureService:
                         tables.append(table)
                     continue
 
+                text = self._block_text(block)
                 if element_type in {
                     LayoutElementType.FIGURE,
                     LayoutElementType.IMAGE,
                     LayoutElementType.LOGO,
-                }:
+                } and not text.strip():
                     continue
 
-                text = self._block_text(block)
                 if not text.strip():
                     continue
+
+                from app.modules.ocr.geometry import proportional_word_boxes
+                from app.modules.ocr.paddle_service import OCRLine, OCRWord
+
+                confidence = float(block.get("score", block.get("confidence", 0.85)))
+                words = [
+                    OCRWord(text=w, confidence=confidence, bbox=wb)
+                    for w, wb in proportional_word_boxes(text.strip(), bbox)
+                ]
+                line = OCRLine(
+                    text=text.strip(),
+                    confidence=confidence,
+                    bbox=bbox,
+                    words=words,
+                )
                 paragraphs.append(
                     OCRParagraph(
                         text=text.strip(),
                         bbox=bbox,
-                        confidence=float(block.get("score", block.get("confidence", 0.85))),
+                        confidence=confidence,
+                        lines=[line],
                         reading_order=order,
                     )
                 )

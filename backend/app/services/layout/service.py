@@ -42,6 +42,7 @@ class LayoutService:
     ) -> None:
         self._doclayout = doclayout
         self._structure = structure
+        self._last_structure: StructurePageResult | None = None
 
     @property
     def provider_name(self) -> str:
@@ -73,9 +74,12 @@ class LayoutService:
     ) -> LayoutPageResult:
         if self._structure.is_available:
             structure = self._structure.analyze_page(image_path, page_number, width, height)
+            self._last_structure = structure
             if structure.layout_regions:
                 return self._structure.to_layout_result(structure)
             logger.warning("pp_structure_empty_fallback", page=page_number)
+        else:
+            self._last_structure = None
 
         result = self._doclayout.detect_page(image_path, page_number, width, height)
         if not result.regions:
@@ -95,7 +99,6 @@ class LayoutService:
     def text_regions(self, layout: LayoutPageResult) -> list[LayoutRegion]:
         return [r for r in layout.regions if r.element_type in TEXT_REGION_TYPES]
 
-    def get_structure_tables(self, image_path: Path, page_number: int) -> StructurePageResult | None:
-        if not self._structure.is_available:
-            return None
-        return self._structure.analyze_page(image_path, page_number)
+    def last_structure_result(self) -> StructurePageResult | None:
+        """Shared PP-Structure result from the most recent detect_page call."""
+        return self._last_structure

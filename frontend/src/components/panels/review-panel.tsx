@@ -7,7 +7,7 @@ import { useDocumentStore } from "@/stores/document-store";
 import { useViewerStore } from "@/stores/viewer-store";
 import { useSettingsStore } from "@/stores/settings-store";
 
-type ReviewFilter = "all" | "needs_review" | "edited" | "errors";
+type ReviewFilter = "all" | "needs_review" | "edited" | "errors" | "overflow";
 
 function isTextBlock(b: Block): b is TextBlock {
   return b.type === "text";
@@ -41,6 +41,8 @@ export function ReviewPanel() {
             b.translated_text.trim() === b.original_text.trim() &&
             document?.source_language !== document?.target_language,
         );
+      case "overflow":
+        return textBlocks.filter((b) => Boolean(b.metadata?.overflow));
       default:
         return textBlocks;
     }
@@ -69,6 +71,13 @@ export function ReviewPanel() {
         </p>
       </div>
 
+      {scores && (scores.layout_quality ?? 1) < 0.7 && (
+        <p className="rounded-md border border-orange-400/50 bg-orange-500/10 px-3 py-2 text-xs text-orange-800 dark:text-orange-200">
+          Layout quality is {((scores.layout_quality ?? 0) * 100).toFixed(0)}% — review overflow
+          blocks and source text left before export.
+        </p>
+      )}
+
       {scores && (
         <dl className="grid grid-cols-2 gap-2 rounded-lg border border-border bg-muted/30 p-3 text-xs">
           <div>
@@ -92,6 +101,10 @@ export function ReviewPanel() {
             <dd className="font-medium">{scores.overflow_count ?? 0}</dd>
           </div>
           <div>
+            <dt className="text-muted-foreground">Blocks</dt>
+            <dd className="font-medium">{scores.blocks_total ?? textBlocks.length}</dd>
+          </div>
+          <div>
             <dt className="text-muted-foreground">Edited</dt>
             <dd className="font-medium">{scores.blocks_edited ?? 0}</dd>
           </div>
@@ -103,6 +116,7 @@ export function ReviewPanel() {
           [
             ["all", "All"],
             ["needs_review", "Needs review"],
+            ["overflow", "Overflow"],
             ["edited", "Edited"],
             ["errors", "Unchanged"],
           ] as const
@@ -139,6 +153,7 @@ export function ReviewPanel() {
                 block.translation_confidence != null &&
                   block.translation_confidence < 0.7 &&
                   "border-orange-400/40",
+                block.metadata?.overflow && "border-red-400/50",
               )}
             >
               <div className="flex items-center justify-between gap-2">

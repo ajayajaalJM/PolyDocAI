@@ -34,11 +34,12 @@ class Settings(BaseSettings):
 
     ocr_lang: str = "en"
     ocr_dpi: int = 300
-    layout_confidence: float = 0.2
+    layout_confidence: float = 0.35
     layout_imgsz: int = 1024
 
     pipeline_max_concurrency: int = 2
     pipeline_cache_enabled: bool = True
+    cache_version: str = "v2"
     vision_provider: str = "heuristic"
     ollama_vision_model: str = "llama3.2-vision"
 

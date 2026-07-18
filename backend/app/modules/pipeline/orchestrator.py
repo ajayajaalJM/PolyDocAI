@@ -236,33 +236,46 @@ class PipelineOrchestrator:
         upload_path = await self._storage.get_upload_path(document.id)
 
         async def render_one(page) -> None:
-            page.translated_raster_path = None
-            stripped_bytes = await asyncio.to_thread(
-                self._reconstruction.render_stripped_page_png,
-                page,
-                storage_root=storage_root,
-                document_id=document.id,
-                upload_path=upload_path,
-                dpi=self._ocr_dpi,
-            )
-            await self._storage.save_stripped_raster(
-                document.id, page.page_number, stripped_bytes
-            )
-            png_bytes = await asyncio.to_thread(
-                self._reconstruction.render_page_png,
-                page,
-                use_translated=True,
-                storage_root=storage_root,
-                document_id=document.id,
-                upload_path=upload_path,
-                dpi=self._ocr_dpi,
-                source_type=document.metadata.source_type,
-                target_language=document.target_language,
-            )
-            path = await self._storage.save_translated_raster(
-                document.id, page.page_number, png_bytes
-            )
-            page.translated_raster_path = str(path.relative_to(storage_root))
+            try:
+                page.translated_raster_path = None
+                stripped_bytes = await asyncio.to_thread(
+                    self._reconstruction.render_stripped_page_png,
+                    page,
+                    storage_root=storage_root,
+                    document_id=document.id,
+                    upload_path=upload_path,
+                    dpi=self._ocr_dpi,
+                )
+                await self._storage.save_stripped_raster(
+                    document.id, page.page_number, stripped_bytes
+                )
+                png_bytes = await asyncio.to_thread(
+                    self._reconstruction.render_page_png,
+                    page,
+                    use_translated=True,
+                    storage_root=storage_root,
+                    document_id=document.id,
+                    upload_path=upload_path,
+                    dpi=self._ocr_dpi,
+                    source_type=document.metadata.source_type,
+                    target_language=document.target_language,
+                )
+                path = await self._storage.save_translated_raster(
+                    document.id, page.page_number, png_bytes
+                )
+                page.translated_raster_path = str(path.relative_to(storage_root))
+            except Exception as exc:
+                logger.exception(
+                    "page_reconstruction_failed",
+                    document_id=document.id,
+                    page=page.page_number,
+                    error=str(exc),
+                )
+                document.metadata.warnings.append(
+                    f"Page {page.page_number}: reconstruction failed ({exc})."
+                )
+                return
+
             logger.info(
                 "page_reconstructed",
                 document_id=document.id,
@@ -278,29 +291,64 @@ class PipelineOrchestrator:
         page_numbers: list[int] | None = None,
     ) -> None:
         storage_root = Path(self._storage.root)
+        doc_dir = storage_root / "uploads" / document.id
         pages = document.pages
         if page_numbers:
             pages = [p for p in pages if p.page_number in page_numbers]
 
-        original_paths: dict[int, Path] = {}
-        rendered_paths: dict[int, Path] = {}
+        stripped_paths: dict[int, Path] = {}
         for page in pages:
-            if page.raster_path:
-                original_paths[page.page_number] = storage_root / page.raster_path
-            if page.translated_raster_path:
-                rendered_paths[page.page_number] = storage_root / page.translated_raster_path
+            path = doc_dir / "stripped" / f"page_{page.page_number:04d}.png"
+            if path.exists():
+                stripped_paths[page.page_number] = path
 
-        if not original_paths or not rendered_paths:
+        if not stripped_paths:
             return
 
-        result = await asyncio.to_thread(
-            self._verification._verify_document,
-            document,
-            original_paths,
-            rendered_paths,
-        )
-        if isinstance(result, Document):
-            document.pages = result.pages
+        for _iteration in range(2):
+            result = await asyncio.to_thread(
+                self._verification.verify_and_adjust,
+                document,
+                stripped_paths,
+            )
+            if result.success and result.data:
+                document, adjustments = result.data
+            else:
+                adjustments = []
+
+            if not any("reduce_font" in a or "layout_solve" in a for a in adjustments):
+                break
+
+            await self._reconstruct_pages(document, page_numbers=page_numbers)
+            stripped_paths = {}
+            for page in pages:
+                path = doc_dir / "stripped" / f"page_{page.page_number:04d}.png"
+                if path.exists():
+                    stripped_paths[page.page_number] = path
+
+        self._apply_quality_gates(document, storage_root)
+
+    def _apply_quality_gates(self, document: Document, storage_root: Path) -> None:
+        scores = compute_quality_scores(document, storage_root=storage_root)
+        document.metadata.quality_scores = scores
+
+        residual = scores.get("source_text_residual", 0.0)
+        layout_q = scores.get("layout_quality", 0.0)
+        overflow = scores.get("overflow_count", 0.0)
+
+        if residual > 0.15:
+            document.metadata.warnings.append(
+                f"Source text may still be visible ({int(residual * 100)}% residual). "
+                "Try re-processing or edit blocks in Review."
+            )
+        if overflow > 0:
+            document.metadata.warnings.append(
+                f"{int(overflow)} block(s) have text overflow — shorten translations or rebuild."
+            )
+        if layout_q < 0.7:
+            document.metadata.warnings.append(
+                f"Layout quality is {int(layout_q * 100)}% — review before export."
+            )
 
     async def process(
         self,

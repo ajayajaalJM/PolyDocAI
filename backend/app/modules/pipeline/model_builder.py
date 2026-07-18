@@ -45,10 +45,58 @@ IOU_IMAGE_FILTER = 0.65
 IOU_LAYOUT_MATCH = 0.15
 IOU_SPAN_COVER = 0.45
 MIN_VECTOR_SPANS = 3
+LARGE_REGION_AREA_RATIO = 0.30
+MIN_TEXT_PARAS_IN_LARGE_REGION = 2
+MIN_TEXT_CHARS_IN_LARGE_REGION = 60
 
 
 def _bbox_tuple_to_model(bbox: tuple[float, float, float, float]) -> BoundingBox:
     return BoundingBox(x=bbox[0], y=bbox[1], width=bbox[2], height=bbox[3])
+
+
+def _containment_ratio(
+    inner: tuple[float, float, float, float],
+    outer: tuple[float, float, float, float],
+) -> float:
+    ix, iy, iw, ih = inner
+    ox, oy, ow, oh = outer
+    x1 = max(ix, ox)
+    y1 = max(iy, oy)
+    x2 = min(ix + iw, ox + ow)
+    y2 = min(iy + ih, oy + oh)
+    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    return inter / max(iw * ih, 1.0)
+
+
+def _paragraphs_in_region(paragraphs: list, region_bbox: tuple[float, float, float, float]) -> list:
+    return [p for p in paragraphs if _containment_ratio(p.bbox, region_bbox) >= 0.45]
+
+
+def _should_emit_image_region(
+    region,
+    paragraphs: list,
+    page_width: float,
+    page_height: float,
+) -> bool:
+    page_area = max(page_width * page_height, 1.0)
+    region_area = max(region.bbox[2] * region.bbox[3], 1.0)
+    area_ratio = region_area / page_area
+
+    if area_ratio < 0.06:
+        return True
+
+    inside = _paragraphs_in_region(paragraphs, region.bbox)
+    if not inside:
+        return True
+
+    total_chars = sum(len(getattr(p, "text", "") or "") for p in inside)
+    if area_ratio >= LARGE_REGION_AREA_RATIO:
+        if len(inside) >= MIN_TEXT_PARAS_IN_LARGE_REGION or total_chars >= MIN_TEXT_CHARS_IN_LARGE_REGION:
+            return False
+    elif len(inside) >= 4 or total_chars >= 120:
+        return False
+
+    return True
 
 
 def _is_inside_image_region(
@@ -74,14 +122,12 @@ def _covered_by_spans(
 
 def _erase_boxes_from_paragraph(para) -> list[list[float]]:
     """Collect line/word bounding boxes for precise text removal during reconstruction."""
+    from app.modules.ocr.geometry import word_erase_boxes_from_paragraph
+
+    if hasattr(para, "lines") and para.lines:
+        return word_erase_boxes_from_paragraph(para)
     boxes: list[list[float]] = []
-    for line in getattr(para, "lines", []) or []:
-        if line.bbox:
-            boxes.append([line.bbox[0], line.bbox[1], line.bbox[2], line.bbox[3]])
-        for word in getattr(line, "words", []) or []:
-            if word.bbox:
-                boxes.append([word.bbox[0], word.bbox[1], word.bbox[2], word.bbox[3]])
-    if not boxes and para.bbox:
+    if para.bbox:
         boxes.append([para.bbox[0], para.bbox[1], para.bbox[2], para.bbox[3]])
     return boxes
 
@@ -155,6 +201,7 @@ class DocumentModelBuilder:
             r.bbox
             for r in layout.regions
             if r.element_type in IMAGE_REGION_TYPES
+            and _should_emit_image_region(r, ocr.paragraphs, ocr.width, ocr.height)
         ]
         table_regions = [r for r in layout.regions if r.element_type == LayoutElementType.TABLE]
 
@@ -240,6 +287,19 @@ class DocumentModelBuilder:
                         break
 
             max_chars = estimate_max_chars(para.bbox, style.font_size or 12)
+            erase_boxes = _erase_boxes_from_paragraph(para)
+            if image_path and erase_boxes:
+                from app.modules.reconstruction.typography_metrics import enrich_style_from_word_boxes
+
+                stub = TextBlock(
+                    page_number=ocr.page_number,
+                    bbox=_bbox_tuple_to_model(para.bbox),
+                    original_text=para.text,
+                    style=style,
+                    metadata={"erase_boxes": erase_boxes},
+                )
+                style = enrich_style_from_word_boxes(stub, image_path, page_width=ocr.width)
+
             region_bbox = self._nearest_region_bbox(para.bbox, layout.regions)
             vision = vision_by_bbox.get(region_bbox)
             if vision and vision.estimated_font_size and not pdf_spans:
@@ -325,6 +385,8 @@ class DocumentModelBuilder:
         # --- Image blocks (assets cropped in orchestrator) ---
         for region in layout.regions:
             if region.element_type not in IMAGE_REGION_TYPES:
+                continue
+            if not _should_emit_image_region(region, ocr.paragraphs, ocr.width, ocr.height):
                 continue
             blocks.append(
                 ImageBlock(

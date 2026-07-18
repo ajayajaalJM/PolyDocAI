@@ -110,11 +110,9 @@ class PagePipeline:
         if vision_result.warnings:
             warnings.extend(vision_result.warnings)
 
-        structure_result: StructurePageResult | None = None
-        if self._layout.provider_name == "pp_structure":
-            structure_result = self._layout.get_structure_tables(work_path, ctx.page_number)
-            if structure_result and structure_result.tables:
-                structure_tables = structure_result.tables
+        structure_result: StructurePageResult | None = self._layout.last_structure_result()
+        if structure_result and structure_result.tables:
+            structure_tables = structure_result.tables
 
         ocr_data, ocr_hit = self._extract_ocr(
             ctx,
@@ -272,13 +270,11 @@ class PagePipeline:
         structure_result: StructurePageResult | None,
         timings: dict[str, float],
     ) -> tuple[OCRPageResult, bool]:
-        cache_hit = False
-        ocr_key = f"{work_hash}_{self._ocr.provider_name}"
+        from app.modules.ocr.ocr_merge import merge_ocr_results
 
-        if structure_result and structure_result.paragraphs:
-            ocr_page = self._ocr.from_structure(structure_result)
-            timings["ocr_ms"] = 0.0
-            return ocr_page, False
+        cache_hit = False
+        layout_hash = PipelineCache.hash_regions(text_regions) if text_regions else "full"
+        ocr_key = f"{work_hash}_{self._ocr.provider_name}_{layout_hash}"
 
         if self._enable_cache and self._cache:
             cached = self._cache.get(ctx.document_id, ctx.page_number, "ocr", ocr_key)
@@ -287,18 +283,25 @@ class PagePipeline:
                 timings["ocr_ms"] = 0.0
                 return ocr_from_dict(cached), True
 
-        ocr_result = self._ocr.extract_page(
+        paddle_result = self._ocr.extract_page(
             work_path,
             ctx.page_number,
             width,
             height,
-            text_regions=text_regions,
+            text_regions=text_regions or None,
         )
-        timings["ocr_ms"] = ocr_result.elapsed_ms
-        if not ocr_result.success or ocr_result.data is None:
+        timings["ocr_ms"] = paddle_result.elapsed_ms
+        if not paddle_result.success or paddle_result.data is None:
             raise RuntimeError(f"OCR failed on page {ctx.page_number}")
 
-        ocr_data = ocr_result.data
+        paddle_ocr = paddle_result.data
+
+        if structure_result and structure_result.paragraphs:
+            structure_ocr = self._ocr.from_structure(structure_result)
+            ocr_data = merge_ocr_results(structure_ocr, paddle_ocr)
+        else:
+            ocr_data = paddle_ocr
+
         if self._enable_cache and self._cache:
             self._cache.put(
                 ctx.document_id,

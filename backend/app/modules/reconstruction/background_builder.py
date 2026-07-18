@@ -178,8 +178,11 @@ def remove_text_pixels(
         if mask is not None:
             _paint_pixels(arr, mask, bg)
         else:
+            from app.modules.reconstruction.background_fill import fill_rect_adaptive
+
             for x1, y1, x2, y2 in rects:
-                arr[y1:y2, x1:x2] = bg
+                filled = fill_rect_adaptive(orig, (x1, y1, x2, y2), bg)
+                arr[y1:y2, x1:x2] = np.array(filled)[y1:y2, x1:x2]
 
     for block in table_blocks or []:
         for rect in _cell_rects(block, orig.width, orig.height):

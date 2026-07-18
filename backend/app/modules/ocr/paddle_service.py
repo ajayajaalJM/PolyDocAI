@@ -88,10 +88,11 @@ class PaddleOCRService:
         self, image_path: Path, page_number: int, width: int, height: int
     ) -> OCRPageResult:
         assert self._ocr is not None
+        from app.modules.ocr.geometry import detections_to_paragraphs
+
         start = time.perf_counter()
         raw = self._ocr.predict(str(image_path))
-        paragraphs: list[OCRParagraph] = []
-        reading_order = 0
+        detections: list[tuple[str, float, tuple[float, float, float, float]]] = []
 
         for page in raw:
             texts = self._ocr_field(page, "rec_texts")
@@ -105,28 +106,20 @@ class PaddleOCRService:
                     continue
                 confidence = float(scores[idx]) if idx < len(scores) else 0.0
                 bbox = self._normalize_bbox(boxes[idx] if idx < len(boxes) else None)
-                words = [OCRWord(text=str(text), confidence=confidence, bbox=bbox)]
-                lines = [
-                    OCRLine(
-                        text=str(text),
-                        confidence=confidence,
-                        bbox=bbox,
-                        words=words,
-                    )
-                ]
-                paragraphs.append(
-                    OCRParagraph(
-                        text=str(text),
-                        confidence=confidence,
-                        bbox=bbox,
-                        lines=lines,
-                        reading_order=reading_order,
-                    )
-                )
-                reading_order += 1
+                if bbox[2] <= 0 or bbox[3] <= 0:
+                    continue
+                detections.append((str(text).strip(), confidence, bbox))
+
+        paragraphs = detections_to_paragraphs(detections)
 
         elapsed = (time.perf_counter() - start) * 1000
-        logger.info("ocr_page_complete", page=page_number, blocks=len(paragraphs), ms=elapsed)
+        logger.info(
+            "ocr_page_complete",
+            page=page_number,
+            detections=len(detections),
+            paragraphs=len(paragraphs),
+            ms=elapsed,
+        )
         return OCRPageResult(
             page_number=page_number,
             width=float(width),
